@@ -150,24 +150,23 @@ jobs:
         working-directory: compat/VoidAntiCheat
         run: |
           set -euo pipefail
+          # Весь вывод шага пишем в файл с первой команды: иначе падение на
+          # printApiVersion не оставляет ни строчки диагностики.
+          exec > >(tee /tmp/vac.log) 2>&1
           VER="${{ steps.api.outputs.API_VERSION }}"
+          echo "API_VERSION=$VER"
+          echo "--- окружение ---"
+          java -version 2>&1 | head -2
+          gradle --version | grep -E '^(Gradle|JVM|Daemon|Launcher)'
+          ls -la
+          echo "--- локальный m2 ---"
+          ls -R ~/.m2/repository/org/purpurmc/purpur/purpur-api | head -20
           echo "--- printApiVersion (доказывает, что -PpurpurVersion прочитан) ---"
-          gradle -q printApiVersion -PpurpurVersion="$VER" | tee /tmp/api.txt
+          gradle printApiVersion -PpurpurVersion="$VER" --console=plain 2>&1 | tee /tmp/api.txt
           grep -Fq "purpur-api:$VER" /tmp/api.txt || { echo "::error::-PpurpurVersion не дошёл до сборки"; exit 1; }
-          set +e
-          gradle build -PpurpurVersion="$VER" --stacktrace > /tmp/vac.log 2>&1
-          RC=$?
-          set -e
-          tail -n 120 /tmp/vac.log
-          if [ "$RC" != 0 ]; then
-            # Полный лог недоступен извне через blob-хранилище, поэтому
-            # ошибки выносим в аннотации и в комментарий к коммиту.
-            echo "--- ОШИБКИ КОМПИЛЯЦИИ ---"
-            grep -E "error:|\.java:[0-9]+|What went wrong|Execution failed|Caused by" /tmp/vac.log | head -40 \
-              | sed 's/^/::error::/' || true
-            exit "$RC"
-          fi
-          JAR=$(ls build/libs/VoidAntiCheat-*.jar | grep -v -- '-sources\|-javadoc' | head -n1)
+          echo "--- сборка ---"
+          gradle build -PpurpurVersion="$VER" --stacktrace --console=plain
+          JAR=$(ls build/libs/VoidAntiCheat-*.jar | grep -v -e '-sources' -e '-javadoc' | head -n1)
           test -n "$JAR"
           echo "JAR_PATH=$JAR" >> "$GITHUB_OUTPUT"
 
@@ -228,7 +227,7 @@ jobs:
         run: |
           set +e
           OUT=""
-          [ -f /tmp/vac.log ] && OUT=$(grep -E "error:|What went wrong|Execution failed|\.java:[0-9]+" /tmp/vac.log | head -60)
+          [ -f /tmp/vac.log ] && OUT=$(grep -vE "warning:|^\s+\^" /tmp/vac.log | tail -60)
           [ -z "$OUT" ] && [ -f /tmp/core.log ] && OUT=$(tail -80 /tmp/core.log)
           BODY="### Лог сборки VAC (\`${GITHUB_SHA:0:7}\`)
           \`\`\`
