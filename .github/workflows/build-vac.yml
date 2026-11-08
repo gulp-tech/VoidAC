@@ -154,7 +154,19 @@ jobs:
           echo "--- printApiVersion (доказывает, что -PpurpurVersion прочитан) ---"
           gradle -q printApiVersion -PpurpurVersion="$VER" | tee /tmp/api.txt
           grep -Fq "purpur-api:$VER" /tmp/api.txt || { echo "::error::-PpurpurVersion не дошёл до сборки"; exit 1; }
-          gradle build -PpurpurVersion="$VER" --stacktrace
+          set +e
+          gradle build -PpurpurVersion="$VER" --stacktrace > /tmp/vac.log 2>&1
+          RC=$?
+          set -e
+          tail -n 120 /tmp/vac.log
+          if [ "$RC" != 0 ]; then
+            # Полный лог недоступен извне через blob-хранилище, поэтому
+            # ошибки выносим в аннотации и в комментарий к коммиту.
+            echo "--- ОШИБКИ КОМПИЛЯЦИИ ---"
+            grep -E "error:|\.java:[0-9]+|What went wrong|Execution failed|Caused by" /tmp/vac.log | head -40 \
+              | sed 's/^/::error::/' || true
+            exit "$RC"
+          fi
           JAR=$(ls build/libs/VoidAntiCheat-*.jar | grep -v -- '-sources\|-javadoc' | head -n1)
           test -n "$JAR"
           echo "JAR_PATH=$JAR" >> "$GITHUB_OUTPUT"
@@ -208,6 +220,21 @@ jobs:
             compat/VoidAntiCheat/build/libs/VoidAntiCheat-*.jar
             compat/VoidAntiCheat/build/libs/VoidAntiCheat-*.jar.sha256
           if-no-files-found: error
+
+      - name: Post build log on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          OUT=""
+          [ -f /tmp/vac.log ] && OUT=$(grep -E "error:|What went wrong|Execution failed|\.java:[0-9]+" /tmp/vac.log | head -60)
+          [ -z "$OUT" ] && [ -f /tmp/core.log ] && OUT=$(tail -80 /tmp/core.log)
+          BODY="### Лог сборки VAC (\`${GITHUB_SHA:0:7}\`)
+          \`\`\`
+          ${OUT:-нет данных}
+          \`\`\`"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" -f body="$BODY" || true
 
       - name: Publish to release
         env:
