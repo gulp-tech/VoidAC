@@ -1,0 +1,203 @@
+name: Build VoidAntiCheat for Purpurbedrock 26.2
+
+# Собирает VAC против настоящего API ядра 26.2, а не против заглушки:
+#   1. достаёт исходники ядра из main (zip уже с применёнными Purpur-патчами);
+#   2. прогоняет applyAllPatches  -> появляется paper-api, из которого
+#      собирается :purpur-api (без этого publishToMavenLocal нечего публиковать);
+#   3. publishToMavenLocal       -> ~/.m2/repository/org/purpurmc/purpur/purpur-api/<ver>
+#   4. проверяет enforcement-инварианты статическим тестом;
+#   5. собирает VAC с -PpurpurVersion=<найденная версия>;
+#   6. проверяет, что API не попал в JAR, и публикует артефакт.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "arena/**"
+    paths:
+      - "compat/**"
+      - ".github/workflows/build-vac.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vac-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Ожидаемая версия API. Если publishToMavenLocal опубликует другую —
+  # сборка упадёт, а не соберётся против случайного API.
+  EXPECTED_API_VERSION: "26.2-R0.1-SNAPSHOT"
+  CORE_DIR: Purpurbedrock-arena-16aa0e1c-purpurbedrock
+  CORE_ZIP_SHA256: "24f1e4c6cdc167c89a18c7cefee72e7cdcc2061ded68b8440eebe607023765e4"
+
+jobs:
+  build:
+    name: Java 25 + purpur-api 26.2
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout VoidAC
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Java 21 & 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: |
+            21
+            25
+
+      - name: Set up Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.4.1"
+
+      - name: Configure Git identity for Paperweight
+        run: |
+          git config --global user.email "no-reply@github.com"
+          git config --global user.name "GitHub Actions"
+
+      - name: Extract Purpurbedrock 26.2 core from main
+        run: |
+          set -euo pipefail
+          git fetch origin main --depth 1
+          git show FETCH_HEAD:Purpurbedrock-arena-16aa0e1c-purpurbedrock.zip > /tmp/core.zip
+          ACTUAL=$(sha256sum /tmp/core.zip | cut -d' ' -f1)
+          echo "core zip sha256: $ACTUAL"
+          if [ "$ACTUAL" != "$CORE_ZIP_SHA256" ]; then
+            echo "::warning::Ядро в main изменилось (ожидался $CORE_ZIP_SHA256). Собираю против фактического."
+          fi
+          unzip -q /tmp/core.zip -d core
+          test -d "core/$CORE_DIR"
+          # settings.gradle.kts ядра падает без .git — создаём репозиторий.
+          cd "core/$CORE_DIR"
+          git init -q
+          git add -A
+          git commit -qm "core 26.2 for VAC build"
+          echo "--- java ---"; java -version 2>&1 | head -1
+          echo "--- gradle ---"; gradle --version | grep -E '^(Gradle|JVM)'
+
+      - name: Apply core patches and publish purpur-api to mavenLocal
+        id: core
+        working-directory: core/Purpurbedrock-arena-16aa0e1c-purpurbedrock
+        run: |
+          set -euo pipefail
+          {
+            gradle applyAllPatches --stacktrace
+            test -d paper-api/src/main/java
+            # Тело протокольного движка для API не нужно, но purpur-server
+            # ссылается на ресурс — создаём заглушку, чтобы конфигурация
+            # проекта не падала. В артефакт API она не попадает.
+            mkdir -p purpur-server/src/main/resources/META-INF/bedrock
+            test -f purpur-server/src/main/resources/META-INF/bedrock/purpurbedrock-protocol.jar \
+              || : > purpur-server/src/main/resources/META-INF/bedrock/purpurbedrock-protocol.jar
+            for attempt in 1 2 3; do
+              if gradle :purpur-api:publishToMavenLocal --stacktrace; then break; fi
+              echo "publish attempt ${attempt}/3 failed, retrying in 20s"
+              sleep 20
+              [ "$attempt" = 3 ] && exit 1
+            done
+          } 2>&1 | tee /tmp/core.log
+
+      - name: Verify published API is 26.2
+        id: api
+        run: |
+          set -euo pipefail
+          ls -R ~/.m2/repository/org/purpurmc/purpur/purpur-api || true
+          VER=$(ls -1 ~/.m2/repository/org/purpurmc/purpur/purpur-api | grep -v maven-metadata | head -n1)
+          echo "published: $VER"
+          test -n "$VER"
+          if [ "$VER" != "$EXPECTED_API_VERSION" ]; then
+            echo "::error::Опубликован API '$VER', ожидался '$EXPECTED_API_VERSION'"
+            exit 1
+          fi
+          JAR=~/.m2/repository/org/purpurmc/purpur/purpur-api/$VER/purpur-api-$VER.jar
+          test -f "$JAR" || { echo "::error::нет $JAR"; exit 1; }
+          echo "api jar: $(ls -l "$JAR" | awk '{print $5}') байт"
+          unzip -l "$JAR" | grep -q 'org/bukkit/event/player/PlayerMoveEvent.class'
+          echo "API_VERSION=$VER" >> "$GITHUB_OUTPUT"
+
+      - name: Static check — enforcement:false disables corrections
+        run: python3 compat/verify-enforcement.py
+
+      - name: Build VoidAntiCheat (Gradle)
+        id: build
+        working-directory: compat/VoidAntiCheat
+        run: |
+          set -euo pipefail
+          VER="${{ steps.api.outputs.API_VERSION }}"
+          echo "--- printApiVersion (доказывает, что -PpurpurVersion прочитан) ---"
+          gradle -q printApiVersion -PpurpurVersion="$VER" | tee /tmp/api.txt
+          grep -Fq "purpur-api:$VER" /tmp/api.txt || { echo "::error::-PpurpurVersion не дошёл до сборки"; exit 1; }
+          gradle build -PpurpurVersion="$VER" --stacktrace
+          JAR=$(ls build/libs/VoidAntiCheat-*.jar | grep -v -- '-sources\|-javadoc' | head -n1)
+          test -n "$JAR"
+          echo "JAR_PATH=$JAR" >> "$GITHUB_OUTPUT"
+
+      - name: Maven build (справочно, не блокирует)
+        continue-on-error: true
+        working-directory: compat/VoidAntiCheat
+        run: |
+          command -v mvn >/dev/null && mvn -B -q -DskipTests package \
+            || echo "Maven не установлен в образе — пропускаю (основная сборка Gradle)"
+
+      - name: Verify JAR contents and checksum
+        id: verify
+        working-directory: compat/VoidAntiCheat
+        run: |
+          set -euo pipefail
+          JAR="${{ steps.build.outputs.JAR_PATH }}"
+          unzip -t "$JAR" >/dev/null
+          echo "--- plugin.yml ---"
+          unzip -p "$JAR" plugin.yml | head -20
+          unzip -p "$JAR" plugin.yml | grep -q "api-version: '26.2'" \
+            || { echo "::error::api-version в plugin.yml не 26.2"; exit 1; }
+          # API сервера не должен лежать внутри плагина
+          if unzip -l "$JAR" | grep -qE ' (org/bukkit|io/papermc|org/purpurmc)/'; then
+            echo "::error::В JAR попал API сервера"; unzip -l "$JAR" | grep -E ' (org/bukkit|io/papermc|org/purpurmc)/' | head; exit 1
+          fi
+          echo "--- классы VAC: $(unzip -l "$JAR" | grep -c 'ru/voidpe/anticheat/.*\.class') ---"
+          SHA=$(sha256sum "$JAR" | cut -d' ' -f1)
+          SIZE=$(stat -c '%s' "$JAR")
+          echo "$SHA  $(basename "$JAR")" > "$JAR.sha256"
+          echo "JAR_SHA=$SHA" >> "$GITHUB_OUTPUT"
+          echo "JAR_SIZE=$SIZE" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Сборка VAC завершена"
+            echo ""
+            echo "| Параметр | Значение |"
+            echo "|---|---|"
+            echo "| JAR | \`$(basename "$JAR")\` |"
+            echo "| Размер | $SIZE байт |"
+            echo "| SHA-256 | \`$SHA\` |"
+            echo "| API | purpur-api:${{ steps.api.outputs.API_VERSION }} (compileOnly) |"
+            echo "| Java | $(java -version 2>&1 | head -1) |"
+            echo "| Gradle | $(gradle --version | grep '^Gradle' | cut -d' ' -f2) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload JAR artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoidAntiCheat-26.2
+          path: |
+            compat/VoidAntiCheat/build/libs/VoidAntiCheat-*.jar
+            compat/VoidAntiCheat/build/libs/VoidAntiCheat-*.jar.sha256
+          if-no-files-found: error
+
+      - name: Publish to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="vac-2.0.4-compat"
+          SHA="${{ steps.verify.outputs.JAR_SHA }}"
+          JAR="compat/VoidAntiCheat/${{ steps.build.outputs.JAR_PATH }}"
+          gh release view "$TAG" >/dev/null 2>&1 || \
+            gh release create "$TAG" --title "VoidAntiCheat 2.0.4 (Purpurbedrock 26.2)" \
+              --notes "Сборка против purpur-api ${{ steps.api.outputs.API_VERSION }}. SHA-256: \`$SHA\`"
+          gh release upload "$TAG" "$JAR" "$JAR.sha256" --clobber
+          echo "release: https://github.com/${{ github.repository }}/releases/tag/$TAG"
