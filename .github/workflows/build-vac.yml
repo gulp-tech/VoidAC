@@ -183,6 +183,7 @@ jobs:
         run: |
           echo "MAVEN_STATUS=НЕ ЗАПУСКАЛАСЬ" > /tmp/maven-status.txt
           set -euo pipefail
+          exec > >(tee /tmp/maven.log) 2>&1
           ok=false
           for attempt in 1 2 3; do
             if curl -fsSL --retry 5 --retry-all-errors -o /tmp/mvn.tar.gz \
@@ -195,7 +196,11 @@ jobs:
           tar xzf /tmp/mvn.tar.gz -C /opt
           MVN=/opt/apache-maven-3.9.9/bin/mvn
           "$MVN" -B -q -version
-          "$MVN" -B package -DskipTests
+          if ! "$MVN" -B package -DskipTests; then
+            ERR=$(grep -E "ERROR|BUILD FAILURE" /tmp/maven.log | head -5 | tr '\n' ' ')
+            echo "MAVEN_STATUS=ОШИБКА: ${ERR:0:300}" > /tmp/maven-status.txt
+            exit 1
+          fi
           ls -l target/*.jar
           MJAR=$(ls target/VoidAntiCheat-*.jar | head -1)
           echo "MAVEN_STATUS=СОБРАН ($MJAR, $(stat -c '%s' "$MJAR") байт)" > /tmp/maven-status.txt
