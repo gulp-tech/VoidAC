@@ -1,0 +1,1925 @@
+--- a/src/main/java/ru/voidpe/anticheat/VoidAntiCheat.java
++++ b/src/main/java/ru/voidpe/anticheat/VoidAntiCheat.java
+@@ -49,6 +49,8 @@
+ import org.bukkit.event.player.PlayerVelocityEvent;
+ import org.bukkit.inventory.EquipmentSlot;
+ import org.bukkit.inventory.ItemStack;
++import org.bukkit.persistence.PersistentDataContainer;
++import org.bukkit.persistence.PersistentDataType;
+ import org.bukkit.plugin.PluginManager;
+ import org.bukkit.plugin.java.JavaPlugin;
+ import org.bukkit.potion.PotionEffect;
+@@ -127,6 +129,8 @@
+     private final Set<UUID> alertsOff = new HashSet<>();
+ 
+     private FloodgateHook floodgate;
++    private BedrockCoreBridge coreBridge;
++    private AntiEspManager antiEsp;
+     private RegionHook regions;
+     private BukkitTask secondTask;
+     private ExecutorService ioExecutor;
+@@ -134,6 +138,12 @@
+     private LagCompensation.Limits lagLimits = LagCompensation.Limits.defaults();
+     /** null — ещё не проверяли; см. fastAttackServer(). */
+     private Boolean fastAttackCache;
++    /**
++     * Кэш {@code bedrockCombatEnabled} ПО МИРАМ: флаг лежит в
++     * {@code PurpurWorldConfig}, то есть у каждого мира свой. Один общий
++     * {@code Boolean} вернул бы значение первого встреченного мира для всех.
++     */
++    private final Map<String, Boolean> coreCombatByWorld = new HashMap<>();
+ 
+     private Attribute movementSpeedAttribute;
+     private Attribute interactionRangeAttribute;
+@@ -170,6 +180,17 @@
+                     + ": " + failure.getMessage() + ") — проверки работают на консервативных значениях по умолчанию");
+         }
+         floodgate = new FloodgateHook(getLogger());
++        coreBridge = new BedrockCoreBridge(getLogger());
++        antiEsp = new AntiEspManager(this, getLogger());
++        antiEsp.configure(
++                confBool("anti-esp.enabled", false),
++                confInt("anti-esp.interval-ticks", 10),
++                confInt("anti-esp.join-grace-ticks", 60),
++                confDouble("anti-esp.min-distance", 2.0),
++                confDouble("anti-esp.max-distance", 96.0),
++                confBool("anti-esp.hide-spectators", true),
++                confBool("anti-esp.hide-invisible", true),
++                confBool("anti-esp.only-if-core-inactive", true));
+         regions = new RegionHook(getLogger());
+         ioExecutor = Executors.newSingleThreadExecutor(runnable -> {
+             Thread thread = new Thread(runnable, "VoidAntiCheat-IO");
+@@ -205,6 +226,10 @@
+         if (ioExecutor != null) {
+             ioExecutor.shutdownNow();
+         }
++        if (antiEsp != null) {
++            antiEsp.reset();
++            antiEsp.stop(false);
++        }
+         players.clear();
+         alertsOff.clear();
+     }
+@@ -326,10 +351,24 @@
+         } else {
+             data.bedrock = confBool("settings.check-all-if-floodgate-missing", true);
+         }
++        // Устройство: приоритет у ядра (живая Geyser-сессия), затем Floodgate.
++        // Ядро отдаёт правдоподобные значения даже без сессии (device_id=android,
++        // device=Android, is_bedrock=true при only-allow-bedrock), поэтому берём
++        // deviceId только когда сессия реально есть. Иначе — unknown, и проверки
++        // работают на мягких лимитах, а не наказывают за отсутствие данных.
++        if (data.bedrock && coreBridge != null) {
++            data.deviceId = coreBridge.deviceId(player);
++            data.sessionPing = coreBridge.ping(player);
++        }
++        boolean haveCoreDevice = !BedrockCoreBridge.DEVICE_UNKNOWN.equals(data.deviceId);
+         if (data.bedrock && floodgate.available()) {
+             data.inputMode = floodgate.inputMode(player.getUniqueId());
+             data.deviceOs = floodgate.deviceOs(player.getUniqueId());
+         }
++        if (!haveCoreDevice && BedrockCoreBridge.isTouchFamily(deviceIdFromFloodgate(data.deviceOs, data.inputMode))) {
++            // Floodgate знает платформу, но не модель: мобильная ОС = сенсорный класс.
++            data.deviceId = deviceIdFromFloodgate(data.deviceOs, data.inputMode);
++        }
+         data.profile = data.bedrock ? "bedrock" : "java";
+         data.bypassAll = player.hasPermission("voidanticheat.bypass");
+         data.excludedHere = isExcluded(player.getLocation());
+@@ -343,6 +382,26 @@
+         return data;
+     }
+ 
++    /**
++     * Категория устройства по данным Floodgate, когда у ядра живой сессии нет.
++     * Это запасной путь: модель устройства отсюда не получить, поэтому
++     * телефон с клавиатурой неотличим от телефона — и это правильно, потому что
++     * оба случая должны получать сенсорные (мягкие) лимиты.
++     * {@code UNKNOWN} остаётся {@code unknown} — проверки обязаны это учитывать.
++     */
++    private String deviceIdFromFloodgate(String deviceOs, String inputMode) {
++        String os = deviceOs == null ? "UNKNOWN" : deviceOs.toUpperCase(Locale.ROOT);
++        return switch (os) {
++            case "GOOGLE", "ANDROID", "AMAZON", "FIREOS", "WINDOWS_PHONE" -> "android";
++            case "IOS", "TVOS", "APPLE_TV" -> "ios";
++            case "XBOX", "XBOX_ONE", "XBOX_SERIES" -> "xbox";
++            case "PS4", "PS5", "PLAYSTATION", "ORBIS" -> "ps4_5";
++            case "NX", "SWITCH", "NINTENDO", "NINTENDO_SWITCH" -> "switch";
++            case "UWP", "WIN32", "WINDOWS", "WINDOWS_X86", "OSX", "MACOS", "LINUX", "DEDICATED" -> "windows";
++            default -> "unknown";
++        };
++    }
++
+     /** Только для тестов/диагностики: состояние без создания. */
+     PlayerData peek(Player player) {
+         return player == null ? null : players.get(player.getUniqueId());
+@@ -371,20 +430,96 @@
+         return mode == GameMode.SURVIVAL || mode == GameMode.ADVENTURE;
+     }
+ 
++    /**
++     * Миры и регионы, где античит молчит.
++     *
++     * <p>Имена миров поддерживают маски, чтобы не перечислять каждый мир
++     * вручную и не пересобирать jar:</p>
++     * <ul>
++     *   <li>{@code world} — точное имя;</li>
++     *   <li>{@code arena-*} — всё, что начинается с {@code arena-};</li>
++     *   <li>{@code *_test} — всё, что заканчивается на {@code _test};</li>
++     *   <li>{@code lobby?} — {@code ?} заменяет ровно один символ;</li>
++     *   <li>{@code world_nether} в списке — регистр не важен.</li>
++     * </ul>
++     * <p>Проверка идёт по имени мира, поэтому не зависит от смены мира,
++     * телепорта и загрузки чанков.</p>
++     */
+     private boolean isExcluded(Location location) {
+         if (location == null || location.getWorld() == null) {
+             return false;
+         }
+         String world = location.getWorld().getName().toLowerCase(Locale.ROOT);
+-        for (String excluded : getConfig().getStringList("settings.excluded-worlds")) {
+-            if (excluded.equalsIgnoreCase(world)) {
+-                return true;
+-            }
++        if (worldMatchesAny(world, getConfig().getStringList("settings.excluded-worlds"))) {
++            return true;
++        }
++        // Обратный вариант: whitelist миров. Пусто = проверять везде.
++        List<String> only = getConfig().getStringList("settings.only-worlds");
++        if (!only.isEmpty() && !worldMatchesAny(world, only)) {
++            return true;
+         }
+         return regions != null && regions.inRegion(location,
+                 getConfig().getStringList("settings.excluded-worldguard-regions"));
+     }
+ 
++    /**
++     * Совпадение имени мира с маской. Реализация намеренно без регулярных
++     * выражений: конфиг читают люди, и случайная {@code *} не должна
++     * превращаться в дорогой regex на каждом move-событии.
++     */
++    static boolean worldMatches(String pattern, String worldName) {
++        if (pattern == null || worldName == null) {
++            return false;
++        }
++        String p = pattern.trim().toLowerCase(Locale.ROOT);
++        if (p.isEmpty()) {
++            return false;
++        }
++        if (p.indexOf('*') < 0 && p.indexOf('?') < 0) {
++            return p.equals(worldName);
++        }
++        return wildcardMatch(p, worldName, 0, 0);
++    }
++
++    private static boolean wildcardMatch(String pattern, String text, int pi, int ti) {
++        while (pi < pattern.length()) {
++            char pc = pattern.charAt(pi);
++            if (pc == '*') {
++                // Схлопываем подряд идущие звёздочки.
++                while (pi + 1 < pattern.length() && pattern.charAt(pi + 1) == '*') {
++                    pi++;
++                }
++                if (pi + 1 == pattern.length()) {
++                    return true;
++                }
++                for (int i = ti; i <= text.length(); i++) {
++                    if (wildcardMatch(pattern, text, pi + 1, i)) {
++                        return true;
++                    }
++                }
++                return false;
++            }
++            if (ti >= text.length()) {
++                return false;
++            }
++            if (pc != '?' && pc != text.charAt(ti)) {
++                return false;
++            }
++            pi++;
++            ti++;
++        }
++        return ti == text.length();
++    }
++
++    private static boolean worldMatchesAny(String worldName, List<String> patterns) {
++        for (String pattern : patterns) {
++            if (worldMatches(pattern, worldName)) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     private boolean inGrace(PlayerData data) {
+         return System.currentTimeMillis() < data.graceUntilMillis;
+     }
+@@ -396,10 +531,16 @@
+     @EventHandler(priority = EventPriority.MONITOR)
+     public void onJoin(PlayerJoinEvent event) {
+         createData(event.getPlayer(), true);
++        if (antiEsp != null) {
++            antiEsp.onJoin(event.getPlayer());
++        }
+     }
+ 
+     @EventHandler(priority = EventPriority.MONITOR)
+     public void onQuit(PlayerQuitEvent event) {
++        if (antiEsp != null) {
++            antiEsp.onQuit(event.getPlayer());
++        }
+         players.remove(event.getPlayer().getUniqueId());
+         alertsOff.remove(event.getPlayer().getUniqueId());
+     }
+@@ -410,6 +551,10 @@
+         if (event.getTo() != null) {
+             grantGrace(data, confLong("settings.teleport-grace-ms", 1750L));
+             data.resetMovement(event.getTo(), Bukkit.getCurrentTick(), System.nanoTime(), event.getPlayer().isOnGround());
++            // Клиент пришлёт свою позицию позже, и она может не совпасть с точкой
++            // телепорта (RTP, дом клана, вход в данж, AuthSpawn). Первое движение
++            // после телепорта — это согласование, а не движение игрока.
++            data.unsyncedPosition = true;
+             data.clearSustainAll();
+             updateSafeLocation(event.getPlayer(), event.getTo(), data);
+         }
+@@ -420,6 +565,7 @@
+         PlayerData data = data(event.getPlayer());
+         grantGrace(data, confLong("settings.respawn-grace-ms", 3500L));
+         data.resetMovement(event.getRespawnLocation(), Bukkit.getCurrentTick(), System.nanoTime(), true);
++        data.unsyncedPosition = true;
+         data.safeLocation = event.getRespawnLocation().clone();
+         data.clearSustainAll();
+     }
+@@ -430,6 +576,7 @@
+         grantGrace(data, confLong("settings.world-change-grace-ms", 2500L));
+         data.resetMovement(event.getPlayer().getLocation(), Bukkit.getCurrentTick(), System.nanoTime(),
+                 event.getPlayer().isOnGround());
++        data.unsyncedPosition = true;
+         data.clearSustainAll();
+     }
+ 
+@@ -774,11 +921,19 @@
+     }
+ 
+     /** VoidPvP (или другой плагин без кд атаки) делает высокий CPS легальным. */
+-    private boolean fastAttackServer() {
++    private boolean fastAttackServer(Player player) {
+         if (fastAttackCache == null) {
+             PluginManager manager = Bukkit.getPluginManager();
++            // Null cooldown on this core is NOT a plugin feature: Purpurbedrock
++            // patches Player#attack to skip the 1.9 cooldown entirely for Bedrock
++            // players (PurpurWorldConfig.bedrockCombatEnabled = true by default:
++            // attackStrengthTicker = 9999, attackStrengthScale = 1.0). VoidPvP
++            // additionally raises ATTACK_SPEED and zeroes noDamageTicks.
++            // Therefore raw CPS is legitimate server mechanics here, not a cheat
++            // signal, and only click-interval regularity is checked.
+             fastAttackCache = confBool("settings.fast-attack-server", false)
+-                    || manager.getPlugin("VoidPvP") != null;
++                    || manager.getPlugin("VoidPvP") != null
++                    || (confBool("settings.core-zero-attack-cooldown", true) && coreCombatEnabled(player));
+             if (fastAttackCache) {
+                 getLogger().info("Обнаружен режим без кд атаки: сырой CPS не считается автокликером, "
+                         + "проверяется только ровность интервалов.");
+@@ -787,6 +942,49 @@
+         return fastAttackCache;
+     }
+ 
++    /**
++     * Включён ли в ядре Bedrock-боёвка с нулевым кулдауном для ЭТОГО мира.
++     *
++     * <p>Флаг — {@code PurpurWorldConfig.bedrockCombatEnabled}
++     * (по умолчанию {@code true}, ключ
++     * {@code gameplay-mechanics.bedrock-combat.enabled}). Он именно
++     * per-world, поэтому берётся из мира игрока, а не глобально.</p>
++     *
++     * <p>Честная оговорка: {@code World#getHandle()} и {@code .purpurConfig} —
++     * внутренности ядра. Если они переименованы, мы получим ошибку и уйдём в
++     * безопасную сторону (считать, что нулевой кулдаун есть). Ошибка при этом
++     * означает лишь, что частота ударов перестанет быть сама по себе уликой —
++     * остаются ровность интервалов, Reach и KillAura.</p>
++     */
++    private boolean coreCombatEnabled(Player player) {
++        if (player == null || player.getWorld() == null) {
++            return true;
++        }
++        String worldName = player.getWorld().getName();
++        Boolean cached = coreCombatByWorld.get(worldName);
++        if (cached != null) {
++            return cached;
++        }
++        boolean enabled = true; // безопасное направление при любой неопределённости
++        try {
++            Class<?> worldConfig = Class.forName("org.purpurmc.purpur.PurpurWorldConfig");
++            Object config = player.getWorld().getClass().getMethod("getHandle").invoke(player.getWorld());
++            Object worldConfigInstance = config.getClass().getField("purpurConfig").get(config);
++            Object value = worldConfig.getField("bedrockCombatEnabled").get(worldConfigInstance);
++            enabled = value instanceof Boolean flag ? flag : true;
++        } catch (ClassNotFoundException notThisCore) {
++            // Не это ядро (или внутренности переименованы): ориентируемся только
++            // на settings.fast-attack-server, чтобы не выдавать неизвестное
++            // за известное. Частота ударов тогда снова учитывается, но остаются
++            // ровность интервалов, Reach и KillAura.
++            enabled = false;
++        } catch (Throwable ignored) {
++            enabled = true;
++        }
++        coreCombatByWorld.put(worldName, enabled);
++        return enabled;
++    }
++
+     private double currentTps() {
+         double[] tps = Bukkit.getTPS();
+         return tps.length == 0 ? 20.0 : Math.min(20.0, tps[0]);
+@@ -879,6 +1077,32 @@
+             return;
+         }
+ 
++        // Согласование со сторонними телепортами и коррекциями ядра.
++        //
++        // PlayerMoveEvent не всегда начинается там, где мы запомнили позицию:
++        // ночной RTP, выход из кровати, портал, телепорт плагина и принудительная
++        // коррекция ядра (BedrockMovementGuard) могут не пройти через
++        // PlayerTeleportEvent. Раньше эта разница считалась движением и уходила в
++        // Speed/Fly/Timer/NoClip, а setback возвращал игрока назад. Теперь такое
++        // событие — не движение: фиксируем позицию, даём короткий грейс и
++        // начинаем статистику заново.
++        double fromGap = Math.sqrt(Math.pow(event.getFrom().getX() - data.lastX, 2)
++                + Math.pow(event.getFrom().getY() - data.lastY, 2)
++                + Math.pow(event.getFrom().getZ() - data.lastZ, 2));
++        double syncEpsilon = confDouble("movement.sync-epsilon-blocks", 0.08);
++        if (data.unsyncedPosition || fromGap > syncEpsilon) {
++            data.unsyncedPosition = false;
++            grantGrace(data, confLong("settings.unsynced-grace-ms", 600L));
++            data.resetMovement(to, tick, nowNanos, player.isOnGround());
++            updateSafeLocation(player, to, data);
++            if (confBool("settings.debug", false) && fromGap > syncEpsilon) {
++                getLogger().info("[debug] " + player.getName()
++                        + " серверное перемещение на " + formatVl(fromGap)
++                        + " бл. — событие не считается движением игрока");
++            }
++            return;
++        }
++
+         double dx = to.getX() - data.lastX;
+         double dy = to.getY() - data.lastY;
+         double dz = to.getZ() - data.lastZ;
+@@ -1515,15 +1739,24 @@
+         Vector eye = attacker.getEyeLocation().toVector();
+         double current = boxDistance(eye, box);
+ 
++        int attackerPing = effectivePing(attacker, data);
+         int targetPing = target instanceof Player targetPlayer ? targetPlayer.getPing() : 0;
+         long rewindWindow = Math.min(confLong("combat.reach-rewind-max-ms", 800L),
+-                Math.max(150L, attacker.getPing() + targetPing + 120L));
++                Math.max(150L, attackerPing + targetPing + 120L));
+         TargetHistory history = data.history(target.getUniqueId());
+         double distance = history.minDistance(eye.getX(), eye.getY(), eye.getZ(), now, rewindWindow, current);
+         history.remember(TargetHistory.sample(now,
+                 box.getMinX(), box.getMinY(), box.getMinZ(), box.getMaxX(), box.getMaxY(), box.getMaxZ()));
+ 
+-        double limit = "TOUCH".equalsIgnoreCase(data.inputMode)
++        // Ввод: явный сенсор/мобильная ОС/телефон с КМ — сенсорный лимит.
++        // Неизвестное устройство тоже получает сенсорный (мягкий) лимит:
++        // отсутствие данных не должно ухудшать положение игрока.
++        boolean touchLike = BedrockCoreBridge.isTouchFamily(data.deviceId)
++                || "TOUCH".equalsIgnoreCase(data.inputMode)
++                || (!BedrockCoreBridge.isDesktopOrConsole(data.deviceId)
++                    && !"KEYBOARD_MOUSE".equalsIgnoreCase(data.inputMode)
++                    && !"CONTROLLER".equalsIgnoreCase(data.inputMode));
++        double limit = touchLike
+                 ? confDouble("combat.reach-touch-max-blocks", 3.65)
+                 : confDouble("combat.reach-max-blocks", 3.45);
+         if (data.bedrock) {
+@@ -1534,7 +1767,7 @@
+             limit = Math.max(limit, interaction + 0.42);
+         }
+         double pingComp = Math.min(confDouble("combat.reach-ping-comp-max-blocks", 0.45),
+-                (attacker.getPing() + targetPing) / 100.0
++                (attackerPing + targetPing) / 100.0
+                         * confDouble("combat.reach-ping-comp-per-100ms", 0.045));
+         limit += pingComp;
+         Vector targetVelocity = target.getVelocity();
+@@ -1543,7 +1776,7 @@
+         limit += Math.min(confDouble("combat.reach-move-comp-max-blocks", 0.35),
+                 targetBps * confDouble("combat.reach-move-comp-per-bps", 0.02));
+         double tolerance = Math.min(confDouble("combat.reach-max-tolerance", 1.30),
+-                data.lag.tolerance(attacker.getPing(), currentTps(), lagLimits));
++                data.lag.tolerance(attackerPing, currentTps(), lagLimits));
+         limit *= tolerance;
+ 
+         double hard = confDouble("combat.reach-hard-cancel-blocks", 4.80) * Math.min(1.15, tolerance);
+@@ -1578,10 +1811,23 @@
+             return;
+         }
+ 
+-        // KillAura: несколько разных целей за короткое окно. Порог заведомо
+-        // выше человеческого PvP, плюс буфер.
++        // KillAura: несколько разных целей за короткое окно.
++        //
++        // На этом ядре серия ударов по нескольким мобам — штатная механика, а не
++        // мультиаура: Player#attack для Bedrock обнуляет кулдаун
++        // (attackStrengthTicker = 9999) и отключает Java-sweep
++        // (bedrockAllowSweepAttack = false), поэтому «много целей за секунду»
++        // получается само, если бить по толпе. Плюс отбрасывание усилено
++        // (knockback-multiplier 1.05) и мобы разлетаются по разным целям.
++        // Поэтому на таком сервере порог поднимается, а не остаётся «заведомо
++        // выше человеческого PvP» из Java-мира.
+         int distinct = distinctTargets(data, now, confLong("combat.killaura-window-ms", 1000L));
+-        if (distinct >= confInt("combat.killaura-multi-targets", 5)) {
++        int distinctLimit = confInt("combat.killaura-multi-targets", 5);
++        if (confBool("settings.core-zero-attack-cooldown", true) && coreCombatEnabled(attacker)) {
++            distinctLimit = Math.max(distinctLimit,
++                    confInt("combat.killaura-multi-targets-bedrock-combat", 9));
++        }
++        if (distinct >= distinctLimit) {
+             flag(attacker, data, CheckId.KILLAURA, 1.0, distinct + " разных целей за 1 сек.");
+             data.attacks.clear();
+         }
+@@ -1645,11 +1891,15 @@
+                 lastSecond++;
+             }
+         }
+-        boolean touch = "TOUCH".equalsIgnoreCase(data.inputMode);
++        boolean touch = BedrockCoreBridge.isTouchFamily(data.deviceId)
++                || "TOUCH".equalsIgnoreCase(data.inputMode)
++                || (!BedrockCoreBridge.isDesktopOrConsole(data.deviceId)
++                    && !"KEYBOARD_MOUSE".equalsIgnoreCase(data.inputMode)
++                    && !"CONTROLLER".equalsIgnoreCase(data.inputMode));
+         // VoidPvP убирает ванильный кулдаун атаки, поэтому высокий CPS там —
+         // штатное поведение, а не автокликер. Оставляем только проверку
+         // машинной ровности интервалов (её спам не даёт).
+-        boolean fastAttack = fastAttackServer();
++        boolean fastAttack = fastAttackServer(player);
+         int maxCps = touch
+                 ? confInt("combat.autoclicker-touch-cps", 27)
+                 : confInt("combat.autoclicker-cps", 24);
+@@ -1716,6 +1966,14 @@
+             return;
+         }
+         int tick = Bukkit.getCurrentTick();
++        // Бур VoidEnchants (3x3 / 3x3x2) ломает блоки серверным расширением, а не
++        // отдельными действиями игрока, поэтому FastBreak такие разрушения не
++        // считает. Источник проверяется по факту: уровень чара лежит в PDC
++        // инструмента (Namespace voidenchants, ключ drill) — клиент подделать его
++        // не может. Отключается: world.fastbreak-server-multiblock-exempt.
++        if (serverMultiBlockBreak(player, data, tick)) {
++            return;
++        }
+         if (data.lastBreakTick == tick) {
+             data.breaksThisTick++;
+         } else {
+@@ -1739,6 +1997,46 @@
+         }
+     }
+ 
++    /**
++     * Инструмент ломает несколько блоков за одно действие сервером
++     * (Бур VoidEnchants I/II). Результат кэшируется на тик: копирование
++     * метаданных предмета не нужно дёргать на каждый блок.
++     */
++    private boolean serverMultiBlockBreak(Player player, PlayerData data, int tick) {
++        if (!confBool("world.fastbreak-server-multiblock-exempt", true)) {
++            return false;
++        }
++        if (data.multiBreakTickId == tick) {
++            return data.multiBreakTick;
++        }
++        data.multiBreakTickId = tick;
++        data.multiBreakTick = false;
++        try {
++            ItemStack tool = player.getInventory().getItemInMainHand();
++            if (tool == null || tool.getType().isAir() || !tool.hasItemMeta()) {
++                return false;
++            }
++            PersistentDataContainer pdc = tool.getItemMeta().getPersistentDataContainer();
++            for (NamespacedKey key : pdc.getKeys()) {
++                if (!"drill".equals(key.getKey())) {
++                    continue;
++                }
++                String namespace = key.getNamespace();
++                if (!"voidenchants".equals(namespace) && !"voiditems".equals(namespace)) {
++                    continue;
++                }
++                Integer level = pdc.get(key, PersistentDataType.INTEGER);
++                if (level != null && level > 0) {
++                    data.multiBreakTick = true;
++                    return true;
++                }
++            }
++        } catch (Throwable ignored) {
++            // Неизвестный предмет — считаем обычным разрушением, проверка работает.
++        }
++        return false;
++    }
++
+     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+     public void onBlockPlace(BlockPlaceEvent event) {
+         Player player = event.getPlayer();
+@@ -1782,8 +2080,16 @@
+         Location center = block.getLocation().add(0.5, 0.5, 0.5);
+         double distance = player.getEyeLocation().distance(center);
+         double tolerance = data.lag.tolerance(player.getPing(), currentTps(), lagLimits);
+-        double hard = confDouble("world.blockreach-hard-cancel-blocks", 7.0) * Math.min(1.2, tolerance);
+-        double max = confDouble("world.blockreach-max-blocks", 6.20) * tolerance;
++        // Ядро Purpurbedrock само расширяет допустимую дальность по блокам:
++        // ServerPlayerGameMode/ServerGamePacketListenerImpl передают в
++        // isWithinBlockInteractionRange множитель bedrockBlockReachTolerance
++        // (2.25 по умолчанию) вместо ванильной 1.0. Отменять на 7 блоках то,
++        // что сервер разрешает до ~10, — это откат штатных действий игрока,
++        // поэтому лимиты масштабируются тем же множителем.
++        double coreFactor = coreBridge == null ? 1.0 : coreBridge.blockReachFactor(player);
++        double hard = confDouble("world.blockreach-hard-cancel-blocks", 7.0)
++                * Math.min(1.2, tolerance) * coreFactor;
++        double max = confDouble("world.blockreach-max-blocks", 6.20) * tolerance * coreFactor;
+         if (distance > hard) {
+             flag(player, data, CheckId.BLOCKREACH, 2.0,
+                     "блок на " + formatVl(distance) + " бл. (жёсткий предел " + formatVl(hard) + ")");
+@@ -2035,6 +2341,160 @@
+         return sender.hasPermission("voidanticheat.admin");
+     }
+ 
++    /** /vac check &lt;id&gt; [on|off|status] — переключение проверки без пересборки jar. */
++    private boolean commandCheck(CommandSender sender, String[] args) {
++        if (args.length < 2) {
++            usage(sender, "check");
++            sender.sendMessage(comp("&7Проверки: &f" + checkKeyList()));
++            return true;
++        }
++        CheckId check = CheckId.byKey(args[1]);
++        if (check == null) {
++            sender.sendMessage(comp("&cНет такой проверки: &f" + args[1]));
++            sender.sendMessage(comp("&7Есть: &f" + checkKeyList()));
++            return true;
++        }
++        CheckSettings current = setting(check);
++        boolean enabled = current != null && current.enabled();
++        if (args.length >= 3) {
++            String mode = args[2].toLowerCase(Locale.ROOT);
++            if ("on".equals(mode) || "enable".equals(mode)) {
++                enabled = true;
++            } else if ("off".equals(mode) || "disable".equals(mode)) {
++                enabled = false;
++            } else if (!"status".equals(mode)) {
++                usage(sender, "check");
++                return true;
++            }
++        }
++        if (current != null) {
++            // Временное состояние: переживает /vac reload? Нет — reload читает
++            // config.yml заново. Это осознанно: файл остаётся источником правды.
++            settings.put(check, new CheckSettings(enabled, current.maxVl(),
++                    current.decayPerSecond(), current.setbackVl(), current.cancelVl(),
++                    current.punishVl(), current.bufferLimit(), current.punishCommands()));
++        }
++        sender.sendMessage(comp("&7Проверка &f" + check.key() + "&7 (&f" + check.display()
++                + "&7): " + (enabled ? "&aвключена" : "&cвыключена")));
++        if (!enabled) {
++            sender.sendMessage(comp("&8Буфер и VL этой проверки больше не растут; "
++                    + "уже накопленные VL затухнут сами."));
++        }
++        return true;
++    }
++
++    private String checkKeyList() {
++        StringBuilder builder = new StringBuilder();
++        for (CheckId check : CheckId.values()) {
++            if (builder.length() > 0) {
++                builder.append(", ");
++            }
++            builder.append(check.key());
++        }
++        return builder.toString();
++    }
++
++    /** /vac world ... — миры, где античит молчит. Работает сразу, без reload. */
++    private boolean commandWorld(CommandSender sender, String[] args) {
++        String action = args.length >= 2 ? args[1].toLowerCase(Locale.ROOT) : "list";
++        switch (action) {
++            case "list" -> {
++                List<String> excluded = getConfig().getStringList("settings.excluded-worlds");
++                List<String> only = getConfig().getStringList("settings.only-worlds");
++                sender.sendMessage(comp("&7Исключённые миры (&f" + excluded.size() + "&7): &f"
++                        + (excluded.isEmpty() ? "—" : String.join(", ", excluded))));
++                sender.sendMessage(comp("&7Только эти миры (&f" + only.size() + "&7): &f"
++                        + (only.isEmpty() ? "— (проверяются все)" : String.join(", ", only))));
++                sender.sendMessage(comp("&8Маски: world, arena-*, *_test, lobby?. "
++                        + "Переключение сбрасывает данные игроков в затронутых мирах."));
++                return true;
++            }
++            case "add" -> {
++                if (args.length < 3) {
++                    usage(sender, "world");
++                    return true;
++                }
++                String pattern = args[2];
++                List<String> excluded = new ArrayList<>(getConfig().getStringList("settings.excluded-worlds"));
++                if (worldMatchesAny(pattern.toLowerCase(Locale.ROOT), excluded)) {
++                    sender.sendMessage(comp("&7Уже в списке: &f" + pattern));
++                    return true;
++                }
++                excluded.add(pattern);
++                getConfig().set("settings.excluded-worlds", excluded);
++                saveConfig();
++                refreshExclusions();
++                sender.sendMessage(comp("&aДобавлено в исключения: &f" + pattern
++                        + "&8 (сохранено в config.yml)"));
++                return true;
++            }
++            case "remove", "del" -> {
++                if (args.length < 3) {
++                    usage(sender, "world");
++                    return true;
++                }
++                List<String> excluded = new ArrayList<>(getConfig().getStringList("settings.excluded-worlds"));
++                if (!excluded.remove(args[2])) {
++                    sender.sendMessage(comp("&cНет в списке: &f" + args[2]));
++                    return true;
++                }
++                getConfig().set("settings.excluded-worlds", excluded);
++                saveConfig();
++                refreshExclusions();
++                sender.sendMessage(comp("&aУбрано из исключений: &f" + args[2]));
++                return true;
++            }
++            case "only" -> {
++                if (args.length < 3) {
++                    usage(sender, "world");
++                    return true;
++                }
++                List<String> only = new ArrayList<>();
++                for (int i = 2; i < args.length; i++) {
++                    only.add(args[i]);
++                }
++                getConfig().set("settings.only-worlds", only);
++                saveConfig();
++                refreshExclusions();
++                sender.sendMessage(comp("&aПроверять только: &f" + String.join(", ", only)));
++                return true;
++            }
++            case "clear-only" -> {
++                getConfig().set("settings.only-worlds", new ArrayList<String>());
++                saveConfig();
++                refreshExclusions();
++                sender.sendMessage(comp("&aWhitelist миров очищен: проверяются все миры"));
++                return true;
++            }
++            default -> {
++                usage(sender, "world");
++                return true;
++            }
++        }
++    }
++
++    /**
++     * Смена исключений должна сразу влиять на игроков: у тех, кто оказался в
++     * исключённом мире, обнуляем состояние движения, иначе после возврата из
++     * «тихого» мира останется накопленная скорость/воздух и проверка сработает
++     * на первом же шаге.
++     */
++    private void refreshExclusions() {
++        for (Player player : Bukkit.getOnlinePlayers()) {
++            PlayerData data = players.get(player.getUniqueId());
++            if (data == null) {
++                continue;
++            }
++            boolean excluded = isExcluded(player.getLocation());
++            if (excluded != data.excludedHere) {
++                data.excludedHere = excluded;
++                data.resetMovement(player.getLocation(), Bukkit.getCurrentTick(),
++                        System.nanoTime(), player.isOnGround());
++                data.clearSustainAll();
++            }
++        }
++    }
++
+     @Override
+     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+         if (!admin(sender)) {
+@@ -2047,9 +2507,34 @@
+                 reloadConfig();
+                 loadCheckSettings();
+                 loadLagLimits();
++                coreCombatByWorld.clear();
++                if (antiEsp != null) {
++                    antiEsp.reset();
++                    antiEsp.stop(false);
++                    antiEsp.configure(
++                            confBool("anti-esp.enabled", false),
++                            confInt("anti-esp.interval-ticks", 10),
++                            confInt("anti-esp.join-grace-ticks", 60),
++                            confDouble("anti-esp.min-distance", 2.0),
++                            confDouble("anti-esp.max-distance", 96.0),
++                            confBool("anti-esp.hide-spectators", true),
++                            confBool("anti-esp.hide-invisible", true),
++                            confBool("anti-esp.only-if-core-inactive", true));
++                }
++                // Буферы/VL не сбрасываем: reload не должен прощать нарушения.
+                 tell(sender, "reloaded");
+                 return true;
+             }
++            case "check" -> {
++                // /vac check <id> [on|off|status] — включение проверки на лету,
++                // без правки jar и без рестарта. Значение живёт до перезапуска
++                // или /vac reload (тогда снова берётся из config.yml).
++                return commandCheck(sender, args);
++            }
++            case "world" -> {
++                // /vac world list | add <маска> | remove <маска> | only <маска...> | clear-only
++                return commandWorld(sender, args);
++            }
+             case "alerts" -> {
+                 if (!(sender instanceof Player player)) {
+                     sender.sendMessage(comp("&7Команда alerts доступна только игроку."));
+@@ -2064,7 +2549,11 @@
+                 return true;
+             }
+             case "info" -> {
+-                Player target = args.length >= 2 ? Bukkit.getPlayerExact(args[1]) : null;
++                if (args.length < 2) {
++                    usage(sender, "info");
++                    return true;
++                }
++                Player target = Bukkit.getPlayerExact(args[1]);
+                 if (target == null) {
+                     tell(sender, "player-not-found");
+                     return true;
+@@ -2106,7 +2595,11 @@
+                 return true;
+             }
+             case "reset" -> {
+-                Player target = args.length >= 2 ? Bukkit.getPlayerExact(args[1]) : null;
++                if (args.length < 2) {
++                    usage(sender, "reset");
++                    return true;
++                }
++                Player target = Bukkit.getPlayerExact(args[1]);
+                 if (target == null) {
+                     tell(sender, "player-not-found");
+                     return true;
+@@ -2128,7 +2621,11 @@
+                 return true;
+             }
+             case "setback" -> {
+-                Player target = args.length >= 2 ? Bukkit.getPlayerExact(args[1]) : null;
++                if (args.length < 2) {
++                    usage(sender, "setback");
++                    return true;
++                }
++                Player target = Bukkit.getPlayerExact(args[1]);
+                 if (target == null) {
+                     tell(sender, "player-not-found");
+                     return true;
+@@ -2142,11 +2639,22 @@
+                 return true;
+             }
+             case "help" -> {
++                if (args.length >= 2) {
++                    String topic = args[1].toLowerCase(Locale.ROOT);
++                    if (!getConfig().isList("messages.command." + topic)) {
++                        tell(sender, "unknown-subcommand", "{sub}", topic);
++                        sendHelp(sender);
++                    } else {
++                        sendHelp(sender, topic);
++                    }
++                    return true;
++                }
+                 sendHelp(sender);
+                 return true;
+             }
+             default -> {
+                 if (!sub.isEmpty()) {
++                    tell(sender, "unknown-subcommand", "{sub}", sub);
+                     sendHelp(sender);
+                     return true;
+                 }
+@@ -2163,41 +2671,150 @@
+     }
+ 
+     private void sendHelp(CommandSender sender) {
++        sendLines(sender, getConfig().getStringList("messages.help"));
++    }
++
++    /**
++     * Собственная справка одной команды: {@code messages.command.<команда>} —
++     * список строк (описание + примеры + право). Так у каждой подкоманды есть
++     * свой текст в конфиге, а не общая простыня.
++     */
++    private void sendHelp(CommandSender sender, String sub) {
++        List<String> lines = getConfig().getStringList("messages.command." + sub);
++        if (lines.isEmpty()) {
++            sendHelp(sender);
++            return;
++        }
++        sendLines(sender, lines);
++    }
++
++    private void sendLines(CommandSender sender, List<String> lines) {
+         String prefix = getConfig().getString("messages.prefix", "");
+-        for (String line : getConfig().getStringList("messages.help")) {
++        for (String line : lines) {
+             sender.sendMessage(comp((prefix == null ? "" : prefix) + line));
+         }
+     }
+ 
++    /**
++     * Ошибка «не хватает аргументов»: говорим, чего не хватает, и сразу
++     * печатаем справку этой команды. Раньше вместо этого выводилось
++     * «игрок не найден», что сбивало с толку.
++     */
++    private void usage(CommandSender sender, String sub) {
++        tell(sender, "usage-format", "{command}", sub, "{usage}", usageOf(sub));
++        sendHelp(sender, sub);
++    }
++
++    private String usageOf(String sub) {
++        return getConfig().getString("messages.usage." + sub, "/vac " + sub);
++    }
++
+     @Override
+     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+-        List<String> out = new ArrayList<>();
+-        if (!admin(sender)) {
+-            return out;
+-        }
+-        String prefix = args.length == 0 ? "" : args[args.length - 1].toLowerCase(Locale.ROOT);
+-        List<String> options = List.of();
+-        if (args.length == 1) {
+-            options = List.of("info", "alerts", "reset", "setback", "reload", "help");
+-        } else if (args.length == 2 && (args[0].equalsIgnoreCase("info")
+-                || args[0].equalsIgnoreCase("reset") || args[0].equalsIgnoreCase("setback"))) {
+-            List<String> names = new ArrayList<>();
+-            for (Player player : Bukkit.getOnlinePlayers()) {
+-                names.add(player.getName());
+-            }
+-            options = names;
+-        } else if (args.length == 3 && args[0].equalsIgnoreCase("reset")) {
+-            List<String> checks = new ArrayList<>();
+-            for (CheckId check : CheckId.values()) {
+-                checks.add(check.key());
+-            }
+-            options = checks;
++        // Ничего не показываем тем, кто не может пользоваться командой, и
++        // никогда не показываем аргументы сверх поддерживаемых: иначе клиент
++        // рисует подсказки там, где команда их не примет.
++        if (!admin(sender) || args.length == 0) {
++            return List.of();
++        }
++        String sub = args[0].toLowerCase(Locale.ROOT);
++        String prefix = args[args.length - 1].toLowerCase(Locale.ROOT);
++
++        List<String> options = args.length == 1
++                ? List.of("info", "alerts", "reset", "setback", "reload", "check", "world", "help")
++                : suggestionsFor(sub, args);
++
++        if (options.isEmpty()) {
++            return List.of();
+         }
++        // Дедупликация + сортировка + префиксный фильтр: у Bedrock-клиента окно
++        // подсказок маленькое, порядок должен быть предсказуемым.
++        List<String> out = new ArrayList<>();
+         for (String option : options) {
+-            if (option.toLowerCase(Locale.ROOT).startsWith(prefix)) {
++            if (option != null && option.toLowerCase(Locale.ROOT).startsWith(prefix) && !out.contains(option)) {
+                 out.add(option);
+             }
+         }
+-        return out;
++        out.sort(String.CASE_INSENSITIVE_ORDER);
++        return out.size() > 100 ? new ArrayList<>(out.subList(0, 100)) : out;
++    }
++
++    /** Подсказки для конкретной подкоманды и позиции аргумента. */
++    private List<String> suggestionsFor(String sub, String[] args) {
++        String action = args[1].toLowerCase(Locale.ROOT);
++        return switch (sub) {
++            // Ровно один аргумент — ник. Дальше подсказывать нечего.
++            case "info", "setback" -> args.length == 2 ? onlinePlayerNames() : List.of();
++            // Без аргументов.
++            case "alerts", "reload" -> List.of();
++            // /vac help <команда>
++            case "help" -> args.length == 2 ? List.of("info", "alerts", "reset", "setback",
++                    "check", "world", "reload", "help") : List.of();
++            case "reset" -> switch (args.length) {
++                case 2 -> onlinePlayerNames();
++                case 3 -> checkKeys();
++                default -> List.of();
++            };
++            case "check" -> switch (args.length) {
++                case 2 -> checkKeys();
++                case 3 -> {
++                    // Подсказываем «противоположное» текущему состоянию первым.
++                    CheckId known = CheckId.byKey(args[1]);
++                    CheckSettings cfg = known == null ? null : setting(known);
++                    boolean on = cfg != null && cfg.enabled();
++                    yield on ? List.of("off", "on", "status") : List.of("on", "off", "status");
++                }
++                default -> List.of();
++            };
++            case "world" -> switch (args.length) {
++                case 2 -> List.of("list", "add", "remove", "only", "clear-only");
++                case 3 -> switch (action) {
++                    // remove — только то, что реально есть в списке.
++                    case "remove", "del" -> excludedWorlds();
++                    // only — имена существующих миров.
++                    case "only" -> allWorldNames();
++                    // add — существующие миры + готовые маски как подсказка.
++                    case "add" -> concatLists(allWorldNames(),
++                            List.of("arena-*", "*_test", "lobby?", "minigames-*"));
++                    default -> List.of();
++                };
++                default -> List.of();
++            };
++            default -> List.of();
++        };
++    }
++
++    private List<String> onlinePlayerNames() {
++        List<String> names = new ArrayList<>();
++        for (Player player : Bukkit.getOnlinePlayers()) {
++            names.add(player.getName());
++        }
++        return names;
++    }
++
++    private List<String> checkKeys() {
++        List<String> keys = new ArrayList<>();
++        for (CheckId check : CheckId.values()) {
++            keys.add(check.key());
++        }
++        return keys;
++    }
++
++    private List<String> excludedWorlds() {
++        return new ArrayList<>(getConfig().getStringList("settings.excluded-worlds"));
++    }
++
++    private List<String> allWorldNames() {
++        List<String> names = new ArrayList<>();
++        for (World world : Bukkit.getWorlds()) {
++            names.add(world.getName());
++        }
++        return names;
++    }
++
++    private static List<String> concatLists(List<String> first, List<String> second) {
++        List<String> merged = new ArrayList<>(first);
++        merged.addAll(second);
++        return merged;
+     }
+ }
+--- a/src/main/java/ru/voidpe/anticheat/PlayerData.java
++++ b/src/main/java/ru/voidpe/anticheat/PlayerData.java
+@@ -21,12 +21,31 @@
+     public boolean bedrock;
+     public String inputMode = "UNKNOWN";
+     public String deviceOs = "UNKNOWN";
++    /**
++     * Категория устройства из ядра/Geyser: {@code windows}, {@code android},
++     * {@code ios}, {@code xbox}, {@code ps4_5}, {@code switch}, {@code phone_kbm}
++     * либо {@code unknown}. {@code unknown} — «данных нет», и все проверки
++     * обязаны вести себя мягче, а не строже.
++     */
++    public String deviceId = "unknown";
++    /** Пинг из Geyser-сессии; -1 = неизвестен (тогда работает джиттер). */
++    public int sessionPing = -1;
+     public String profile = "default";
+ 
+     public boolean bypassAll;
+     public boolean excludedHere;
+     public long graceUntilMillis;
+ 
++    // --- Согласование движения со сторонними плагинами и ядром ---
++    /**
++     * true — следующее move-событие считается согласованием позиции, а не
++     * движением игрока (после телепорта/возрождения/смены мира).
++     */
++    public boolean unsyncedPosition;
++    /** Кэш на тик: инструмент ломает несколько блоков серверным расширением. */
++    public boolean multiBreakTick;
++    public int multiBreakTickId = Integer.MIN_VALUE;
++
+     // Последняя подтверждённая позиция (примитивы — без лишних Location на каждый move).
+     public boolean hasLast;
+     public String lastWorld = "";
+--- a/src/main/resources/config.yml
++++ b/src/main/resources/config.yml
+@@ -40,9 +40,18 @@
+   # Если Floodgate API не нашлась: true = проверять всех (сервер Bedrock-only),
+   # false = никого не проверять до установки Floodgate.
+   check-all-if-floodgate-missing: true
+-  # Не проверять в этих мирах и регионах WorldGuard (арены с кастомной
+-  # физикой, мини-игры, катсцены, плагины с рывками и т.п.).
++  # --- Где античит молчит ---
++  # Миры, имена которых поддерживают маски (пересобирать jar не нужно):
++  #   world            точное имя
++  #   arena-*          всё, что начинается с arena-
++  #   *_test           всё, что заканчивается на _test
++  #   lobby?           ? заменяет ровно один символ
++  # Регистр не важен. Примеры:
++  #   excluded-worlds: [arena-*, "_test", world_the_end]
+   excluded-worlds: []
++  # Обратный режим: проверять ТОЛЬКО эти миры (тоже с масками).
++  # Пусто = проверяются все миры, кроме excluded-worlds.
++  only-worlds: []
+   excluded-worldguard-regions: []
+ 
+   # --- Слои: детект → коррекция → наказание ---
+@@ -53,6 +62,12 @@
+   # true, если на сервере есть плагин без кд атаки (VoidPvP определяется сам):
+   # тогда сырой CPS не считается автокликером, проверяется только ровность.
+   fast-attack-server: false
++  # Ядро Purpurbedrock отключает кулдаун атаки для Bedrock на уровне NMS
++  # (gameplay-mechanics.bedrock-combat.enabled, по умолчанию true). Тогда
++  # высокая частота ударов — штатная механика сервера, а не чит: сырой CPS
++  # не считается автокликером, проверяется только ровность интервалов.
++  # false — игнорировать настройку ядра и считать CPS как на Java.
++  core-zero-attack-cooldown: true
+   # Наказание только если VL держался выше порога столько секунд.
+   punish-min-above-seconds: 20
+   # Наказание только при нескольких активных проверках сразу.
+@@ -85,6 +100,10 @@
+   respawn-grace-ms: 3500
+   world-change-grace-ms: 2500
+   velocity-grace-ms: 900
++  # Грейс, когда позиция сервера разошлась с ожидаемой (телепорт плагина,
++  # коррекция ядра, вход в данж/зону RTP). Такое событие не считается
++  # движением игрока вовсе, грейс — только чтобы не «догонять» его в следующем.
++  unsynced-grace-ms: 600
+   damage-grace-ms: 500
+   piston-grace-ms: 1200
+   piston-grace-radius: 4.0
+@@ -105,9 +124,43 @@
+   staff-alerts: true
+   debug: false
+ 
++# ============================================================
++#  Anti-ESP
++#
++#  Скрывает от клиента игроков, которых не должно быть видно: наблюдателей,
++#  невидимых, слишком далёких. Это профилактика против ESP/Wallhack-паков
++#  (Apollon/Horion/Toolbox), а НЕ доказательство чита: VL за это не начисляется.
++#
++#  ВАЖНО: в ядре Purpurbedrock уже есть свой Anti-ESP (плагин PurpurBedrockAC,
++#  protection.anti-esp). Два владельца видимости = мигание игроков и лишние
++#  пакеты. Поэтому по умолчанию модуль не запускается, если Anti-ESP ядра
++#  активен. Хочешь вести его здесь — выключи его в ядре и поставь
++#  only-if-core-inactive: false.
++# ============================================================
++anti-esp:
++  enabled: false
++  # only-if-core-inactive: true — не запускаться, если ядро владеет видимостью.
++  only-if-core-inactive: true
++  # Как часто пересчитывать (тики). 10 = дважды в секунду; чаще не нужно,
++  # пары со стабильным состоянием не трогаются вообще.
++  interval-ticks: 10
++  # Не трогать новых игроков первые N тиков (клиент грузит мир).
++  join-grace-ticks: 60
++  # Ближе этого скрывать нельзя (0 — не скрывать вблизи).
++  min-distance: 0.0
++  # Дальше этого — скрывать (обычно больше дистанции прорисовки бесполезно).
++  max-distance: 96.0
++  hide-spectators: true
++  hide-invisible: true
++
+ # Компенсация сети. Джиттер считается по интервалам move-пакетов, потому
+ # что player.getPing() у Bedrock через Geyser часто равен 0.
+ compensation:
++  # Если пинг неизвестен (Player.getPing() == 0 — обычное дело у Bedrock через
++  # Geyser, и Geyser-сессия тоже недоступна), считать его таким, а не нулевым.
++  # Ноль обнулял бы окно перемотки и допуск, то есть «неизвестно» наказывалось
++  # бы строже, чем измеренный пинг.
++  unknown-ping-assumed-ms: 120
+   # Прибавка к допуску за каждые 100 мс пинга и её предел.
+   ping-factor-per-100ms: 0.020
+   max-ping-factor: 0.12
+@@ -195,6 +248,10 @@
+   reach-max-tolerance: 1.30
+   # KillAura — только грубые серии, не одиночные удары.
+   killaura-multi-targets: 5
++  # На ядре с Bedrock-боёвкой (нулевой кд атаки + отключённый
++  # Java-sweep) серия ударов по толпе мобов — штатная механика.
++  # Порог поднимается только если ядро реально включает bedrock-combat.
++  killaura-multi-targets-bedrock-combat: 9
+   killaura-window-ms: 1000
+   killaura-wall-min-distance: 1.90
+   killaura-wall-max-ping: 320
+@@ -215,6 +272,10 @@
+ world:
+   fastbreak-per-second: 28
+   fastbreak-same-tick: 4
++  # Бур VoidEnchants ломает 3x3/3x3x2 серверным расширением: такие разрушения
++  # не считаются отдельными действиями игрока. Источник — ключ drill в PDC
++  # инструмента (namespace voidenchants), подделать с клиента нельзя.
++  fastbreak-server-multiblock-exempt: true
+   fastplace-per-second: 28
+   fastplace-same-tick: 4
+   # Рука до блока: survival vanilla ~4.5, порог с Bedrock запасом.
+@@ -403,11 +464,76 @@
+   info-lag: "&7Сеть: интервал &f{interval}&7 мс, джиттер &f{jitter}&7 мс, допуск &f{tolerance}&7x"
+   info-none: "&7Активных VL нет."
+   info-line: "&7{check}: &c{vl}&7/{max_vl} &8(буфер {buffer})"
++  # Общая справка: /vac, /vac help и любой неизвестный ввод.
+   help:
+-    - "&fVoidAntiCheat:"
+-    - "&7/vac &8— статус античита"
+-    - "&7/vac info <игрок> &8— VL, сеть, устройство и ввод игрока"
+-    - "&7/vac alerts &8— вкл/выкл алерты себе"
+-    - "&7/vac reset <игрок> [проверка] &8— сбросить VL"
+-    - "&7/vac setback <игрок> &8— вернуть игрока на безопасную точку"
+-    - "&7/vac reload &8— перезагрузка конфига"
++    - "&8&m        &r &fVoidAntiCheat &7— команды &8&m        "
++    - "&f/vac &8— статус античита"
++    - "&f/vac info &7<игрок> &8— VL, сеть, устройство, ввод"
++    - "&f/vac alerts &8— вкл/выкл алерты себе"
++    - "&f/vac reset &7<игрок> [проверка] &8— сбросить VL"
++    - "&f/vac setback &7<игрок> &8— вернуть на безопасную точку"
++    - "&f/vac check &7[проверка] [on|off] &8— вкл/выкл проверку на лету"
++    - "&f/vac world &7list|add|remove|only|clear-only &8— миры исключений"
++    - "&f/vac reload &8— перечитать config.yml"
++    - "&f/vac help &7[команда] &8— эта справка / помощь по команде"
++
++  # Строка «чего не хватает» перед справкой конкретной команды.
++  usage-format: "&cНе хватает аргументов: &f{usage}"
++  unknown-subcommand: "&cНеизвестная подкоманда: &f{sub}"
++
++  # Краткое использование для сообщения usage.
++  usage:
++    info: "/vac info <игрок>"
++    reset: "/vac reset <игрок> [проверка]"
++    setback: "/vac setback <игрок>"
++    check: "/vac check <проверка> [on|off]"
++    world: "/vac world list|add|remove|only|clear-only [маска]"
++    alerts: "/vac alerts"
++    reload: "/vac reload"
++    help: "/vac help [команда]"
++
++  # Своя справка для каждой команды (/vac help <команда> и при нехватке аргументов).
++  command:
++    info:
++      - "&f/vac info <игрок>"
++      - "&7  VL и буферы по всем проверкам, пинг, джиттер, допуск,"
++      - "&7  устройство и режим ввода игрока."
++      - "&7  Право: &fvoidanticheat.admin"
++    alerts:
++      - "&f/vac alerts"
++      - "&7  Включает или выключает алерты лично себе."
++      - "&7  Право: &fvoidanticheat.admin"
++    reset:
++      - "&f/vac reset <игрок> [проверка]"
++      - "&7  Без проверки — сбрасывает VL и буферы по всем проверкам."
++      - "&7  С проверкой — только по одной (см. /vac check)."
++      - "&7  Право: &fvoidanticheat.admin"
++    setback:
++      - "&f/vac setback <игрок>"
++      - "&7  Возвращает игрока на последнюю безопасную точку."
++      - "&7  Право: &fvoidanticheat.admin"
++    check:
++      - "&f/vac check [проверка] [on|off|status]"
++      - "&7  Без аргументов — список всех 19 проверок."
++      - "&7  С проверкой — её состояние; с on/off — переключение."
++      - "&7  Переключение живёт до /vac reload (файл — источник правды)."
++      - "&7  Право: &fvoidanticheat.admin"
++    world:
++      - "&f/vac world list &8— что сейчас в исключениях и whitelist"
++      - "&f/vac world add <маска> &8— добавить мир в исключения"
++      - "&f/vac world remove <маска> &8— убрать из исключений"
++      - "&f/vac world only <маска...> &8— проверять только эти миры"
++      - "&f/vac world clear-only &8— снять whitelist"
++      - "&7  Маски: &fworld&7, &farena-*&7, &f*_test&7, &flobby?"
++      - "&7  Изменения сразу пишутся в config.yml и применяются."
++      - "&7  Право: &fvoidanticheat.admin"
++    reload:
++      - "&f/vac reload"
++      - "&7  Перечитывает config.yml: пороги проверок, миры,"
++      - "&7  Anti-ESP, компенсацию сети. VL и буферы не сбрасываются."
++      - "&7  Право: &fvoidanticheat.admin"
++    help:
++      - "&f/vac help [команда]"
++      - "&7  Без аргумента — общий список команд."
++      - "&7  С аргументом — подробная справка по одной команде."
++      - "&7  Право: &fvoidanticheat.admin"
+--- a/src/main/resources/plugin.yml
++++ b/src/main/resources/plugin.yml
+@@ -1,5 +1,5 @@
+ name: VoidAntiCheat
+-version: '${project.version}'
++version: "2.0.4"
+ main: ru.voidpe.anticheat.VoidAntiCheat
+ api-version: '26.2'
+ author: VoidPE
+@@ -7,13 +7,24 @@
+ softdepend: [Floodgate, Geyser-Spigot, WorldGuard]
+ commands:
+   vac:
+-    description: "VoidAntiCheat: статус, алерты, информация об игроке, сброс VL, setback и reload"
+-    usage: /vac [info <игрок>|alerts|reset <игрок> [проверка]|setback <игрок>|reload]
++    description: "VoidAntiCheat: статус, алерты, VL игрока, сброс, setback, проверки, миры, reload"
++    usage: |
++      /vac — статус античита
++      /vac info <игрок> — VL, сеть, устройство и ввод игрока
++      /vac alerts — вкл/выкл алерты себе
++      /vac reset <игрок> [проверка] — сбросить VL
++      /vac setback <игрок> — вернуть на безопасную точку
++      /vac check [проверка] [on|off] — вкл/выкл проверку на лету
++      /vac world list|add|remove|only|clear-only [маска] — миры исключений
++      /vac reload — перечитать config.yml
++      /vac help [команда] — справка
+     aliases: [voidac, anticheat]
+ permissions:
+   voidanticheat.admin:
+-    description: Управление VoidAntiCheat и просмотр информации
++    description: "Все команды /vac: справка, статус, info, reset, setback, check, world, reload"
+     default: op
++    children:
++      voidanticheat.alerts: true
+   voidanticheat.alerts:
+     description: Получать алерты VoidAntiCheat
+     default: op
+--- a/src/main/java/ru/voidpe/anticheat/BedrockCoreBridge.java
++++ b/src/main/java/ru/voidpe/anticheat/BedrockCoreBridge.java
+@@ -0,0 +1,225 @@
++package ru.voidpe.anticheat;
++
++import org.bukkit.entity.Player;
++
++import java.lang.reflect.Method;
++import java.util.Locale;
++import java.util.logging.Logger;
++
++/**
++ * Мост к встроенному в ядро Purpurbedrock анализатору устройств
++ * ({@code org.purpurmc.purpur.bedrock.BedrockPlaceholderHook}).
++ *
++ * <p>Зачем отдельный класс, а если в ядре уже есть {@code BedrockBridgeInfo}?
++ * Потому что {@code BedrockBridgeInfo} — часть <b>другого</b> плагина
++ * ({@code PurpurBedrockAC}), а не публичный API ядра. Тянуть класс из чужого
++ * jar нельзя: его может не быть. Здесь используется ровно тот же проверенный
++ * шаблон, что и в {@code BedrockBridgeInfo}: рефлексия по
++ * {@code resolveOnline(Player, String)}, один раз на класс, все ошибки глушатся.</p>
++ *
++ * <p><b>Ловушка ядра, которую обязательно надо учитывать.</b>
++ * {@code resolveOnline} отвечает не только реальными данными Geyser-сессии, но и
++ * <i>значениями по умолчанию</i>:</p>
++ * <ul>
++ *   <li>{@code is_bedrock} возвращает {@code "true"} для всех, если включён
++ *       {@code bedrock.only-allow-bedrock} (по умолчанию включён) — это признак
++ *       «сервер только для Bedrock», а НЕ «этот игрок Bedrock»;</li>
++ *   <li>{@code device} без сессии отдаёт {@code bedrock.placeholders.device.android}
++ *       (по умолчанию «Android»), {@code device_id} — {@code "android"};</li>
++ *   <li>{@code protocol} без сессии — {@code "0"}, {@code device_model} — пустую
++ *       строку.</li>
++ * </ul>
++ * <p>Поэтому «данные реальные» проверяется только по значениям, которые
++ * невозможно получить без живой Geyser-сессии: {@code protocol > 0},
++ * непустой {@code device_model} или непустой {@code xuid}. Если ни одно не
++ * подтвердилось — {@link #deviceId(Player)} вернёт {@code "unknown"}, и античит
++ * обязан работать на безопасных (более мягких) значениях, а не считать
++ * отсутствие данных нарушением.</p>
++ */
++final class BedrockCoreBridge {
++
++    /** Категории устройства, которые отдаёт ядро (см. classifyDeviceId). */
++    static final String DEVICE_UNKNOWN = "unknown";
++
++    private final Logger log;
++    private volatile Method resolveOnline;
++    private volatile boolean checked;
++    private volatile boolean reported;
++    private volatile boolean warnedWeakBlockReach;
++
++    BedrockCoreBridge(Logger log) {
++        this.log = log;
++    }
++
++    private void init() {
++        if (checked) {
++            return;
++        }
++        checked = true;
++        try {
++            Class<?> hook = Class.forName("org.purpurmc.purpur.bedrock.BedrockPlaceholderHook");
++            Method method = hook.getMethod("resolveOnline", Player.class, String.class);
++            method.setAccessible(true);
++            resolveOnline = method;
++        } catch (Throwable failure) {
++            resolveOnline = null;
++            if (!reported) {
++                reported = true;
++                log.info("Ядро без встроенного анализатора устройств ("
++                        + failure.getClass().getSimpleName()
++                        + ") — данные устройства берутся из Floodgate, "
++                        + "неизвестное состояние считается безопасным");
++            }
++        }
++    }
++
++    boolean available() {
++        init();
++        return resolveOnline != null;
++    }
++
++    private String query(Player player, String key) {
++        init();
++        Method method = resolveOnline;
++        if (method == null || player == null) {
++            return null;
++        }
++        try {
++            Object value = method.invoke(null, player, key);
++            return value == null ? null : value.toString();
++        } catch (Throwable ignored) {
++            return null;
++        }
++    }
++
++    /**
++     * Есть ли для игрока настоящие данные Geyser-сессии.
++     * Только они дают право строить на устройстве какие-либо выводы.
++     */
++    boolean sessionDataAvailable(Player player) {
++        if (player == null || !available()) {
++            return false;
++        }
++        String protocol = query(player, "protocol");
++        if (protocol != null) {
++            try {
++                if (Integer.parseInt(protocol.trim()) > 0) {
++                    return true;
++                }
++            } catch (NumberFormatException ignored) {
++                // не число — считаем отсутствием данных
++            }
++        }
++        String model = query(player, "device_model");
++        if (model != null && !model.isBlank()) {
++            return true;
++        }
++        String xuid = query(player, "xuid");
++        return xuid != null && !xuid.isBlank();
++    }
++
++    /**
++     * Машиночитаемая категория устройства:
++     * {@code windows}, {@code android}, {@code ios}, {@code xbox},
++     * {@code ps4_5}, {@code switch}, {@code phone_kbm} или {@code unknown}.
++     *
++     * <p>{@code unknown} возвращается, когда данных сессии нет: значение
++     * {@code "android"} от ядра в этом случае — это fallback, а не факт.</p>
++     */
++    String deviceId(Player player) {
++        if (player == null || !available() || !sessionDataAvailable(player)) {
++            return DEVICE_UNKNOWN;
++        }
++        String raw = query(player, "device_id");
++        if (raw == null) {
++            return DEVICE_UNKNOWN;
++        }
++        String id = raw.trim().toLowerCase(Locale.ROOT);
++        return switch (id) {
++            case "windows", "android", "ios", "xbox", "ps4_5", "switch", "phone_kbm" -> id;
++            default -> DEVICE_UNKNOWN;
++        };
++    }
++
++    /**
++     * Пинг из Geyser-сессии, мс. {@code -1} — данных нет.
++     * {@code Bukkit#getPing()} у Bedrock через Geyser часто 0, поэтому это
++     * единственный честный источник; при {@code -1} вызывающий код должен
++     * опираться на джиттер move-событий ({@link LagCompensation}).
++     */
++    int ping(Player player) {
++        if (player == null || !available() || !sessionDataAvailable(player)) {
++            return -1;
++        }
++        String raw = query(player, "ping");
++        if (raw == null) {
++            return -1;
++        }
++        try {
++            int ping = Integer.parseInt(raw.trim());
++            return ping > 0 ? ping : -1;
++        } catch (NumberFormatException ignored) {
++            return -1;
++        }
++    }
++
++    /**
++     * Во сколько раз ядро расширяет допустимую дальность по БЛОКАМ.
++     *
++     * <p>Ядро подменяет ванильную проверку в {@code ServerPlayerGameMode} и
++     * {@code ServerGamePacketListenerImpl}:
++     * {@code isWithinBlockInteractionRange(pos, 1.0)} → {@code (..., reachAllowance)},
++     * где {@code reachAllowance = bedrockBlockReachTolerance} (= 2.25 по умолчанию)
++     * при включённом {@code bedrockPreventGhostBlocks}. Это множитель к атрибуту
++     * {@code block_interaction_range} (4.5), то есть ядро разрешает добывать и
++     * ставить блоки примерно до 10 блоков.</p>
++     *
++     * <p>Античит, который отменяет блок на 7 блоках, отменял бы то, что сервер
++     * разрешает. Поэтому здесь возвращается тот же множитель.</p>
++     *
++     * <p><b>Важно:</b> при значении 2.25 проверка BlockReach фактически
++     * выключается — это следствие настройки ядра, а не античита. Правильное
++     * место для ужесточения — {@code bedrock.anti-ghost-blocks.reach-tolerance}
++     * в конфиге ядра.</p>
++     *
++     * @return множитель ≥ 1.0; 1.0 — ядро дальность не расширяет
++     */
++    double blockReachFactor(Player player) {
++        if (player == null || player.getWorld() == null) {
++            return 1.0;
++        }
++        try {
++            Object handle = player.getWorld().getClass().getMethod("getHandle").invoke(player.getWorld());
++            Object worldConfig = handle.getClass().getField("purpurConfig").get(handle);
++            Object enabled = worldConfig.getClass().getField("bedrockPreventGhostBlocks").get(worldConfig);
++            if (!(enabled instanceof Boolean on) || !on) {
++                return 1.0;
++            }
++            Object tolerance = worldConfig.getClass().getField("bedrockBlockReachTolerance").get(worldConfig);
++            if (!(tolerance instanceof Double factor) || factor <= 1.0) {
++                return 1.0;
++            }
++            if (!warnedWeakBlockReach) {
++                warnedWeakBlockReach = true;
++                log.warning(String.format(Locale.ROOT,
++                        "Ядро расширяет дальность по блокам в x%.2f: BlockReach будет ослаблен. "
++                                + "Ужесточать надо в конфиге ядра: "
++                                + "bedrock.anti-ghost-blocks.reach-tolerance = 1.0", factor));
++            }
++            return factor;
++        } catch (Throwable notThisCore) {
++            return 1.0;
++        }
++    }
++
++    /** Мобильная ОС или телефон с клавиатурой/мышью — это сенсорный класс ввода. */
++    static boolean isTouchFamily(String deviceId) {
++        return "android".equals(deviceId) || "ios".equals(deviceId) || "phone_kbm".equals(deviceId);
++    }
++
++    /** Настольная/консольная категория — здесь строгие лимиты оправданны. */
++    static boolean isDesktopOrConsole(String deviceId) {
++        return "windows".equals(deviceId) || "xbox".equals(deviceId)
++                || "ps4_5".equals(deviceId) || "switch".equals(deviceId);
++    }
++}
+--- a/src/main/java/ru/voidpe/anticheat/AntiEspManager.java
++++ b/src/main/java/ru/voidpe/anticheat/AntiEspManager.java
+@@ -0,0 +1,340 @@
++package ru.voidpe.anticheat;
++
++import org.bukkit.Bukkit;
++import org.bukkit.entity.Player;
++import org.bukkit.plugin.java.JavaPlugin;
++import org.bukkit.scheduler.BukkitTask;
++
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.Locale;
++import java.util.Map;
++import java.util.Set;
++import java.util.UUID;
++import java.util.logging.Logger;
++
++/**
++ * Anti-ESP для Bedrock-клиентов: скрывает игроков, которые по серверным данным
++ * не могут быть видны, но чей клиент их всё равно рисует (читы вида ESP/Wallhack
++ * из паков Apollon/Horion/Toolbox).
++ *
++ * <p><b>Почему нельзя просто «скрывать всех и часто».</b> В ядре уже есть
++ * {@code AntiEspManager} (плагин {@code PurpurBedrockAC}), который владеет
++ * hide/show с интервалом 4 тика. Второй такой же цикл даёт конфликт владения:
++ * один плагин прячет, другой показывает — мигание игроков и лишние пакеты.
++ * Поэтому:</p>
++ * <ul>
++ *   <li>если Anti-ESP ядра активен, этот модуль <b>по умолчанию выключен</b>
++ *       ({@code anti-esp.only-if-core-inactive: true});</li>
++ *   <li>если ты сознательно ведёшь Anti-ESP здесь — выключи его в ядре
++ *       ({@code /pac} или конфиг ядра), иначе два владельца видимости;</li>
++ *   <li>сам модуль работает редко (по умолчанию раз в 10 тиков) и только по
++ *       игрокам, у которых сменилось состояние — стабильные пары не трогаются,
++ *       поэтому нет постоянного hide/show.</li>
++ * </ul>
++ *
++ * <p><b>Что считается «не должен быть виден»</b> (проверки одна за другой,
++ * каждая дёшева и не трогает чанки):</p>
++ * <ol>
++ *   <li>цель в другом мире, мертва, в другом измерении;</li>
++ *   <li>цель в режиме наблюдателя — её не должно быть видно никому;</li>
++ *   <li>цель невидима (эффект невидимости) и не подсвечена — на Bedrock
++ *       невидимость рисуется иначе, и читы её игнорируют;</li>
++ *   <li>цель за пределами серверной дистанции прорисовки;</li>
++ *   <li>цель скрыта от viewer самим сервером/плагином (Vanish, привилегии) —
++ *       такие пары мы <b>не трогаем вообще</b>, чтобы не «показать» ванишнутого.</li>
++ * </ol>
++ *
++ * <p>Ложные срабатывания тут не наказывают игрока: это сокрытие, а не VL.
++ * Но и «доказательством чита» оно не является — это профилактика. Информация о
++ * устройстве для Anti-ESP не используется.</p>
++ */
++final class AntiEspManager {
++
++    private record Pair(UUID viewer, UUID target) {
++    }
++
++    private static final class Visibility {
++        boolean hidden;
++    }
++
++    private final JavaPlugin plugin;
++    private final Logger log;
++
++    private final Map<Pair, Visibility> states = new HashMap<>();
++    private final Map<UUID, Long> joinGraceUntil = new HashMap<>();
++    /** Кому запрещено прятать (право обхода) — проверяется на тике. */
++    private final Set<UUID> bypassWarned = new HashSet<>();
++
++    private BukkitTask task;
++    private boolean coreConflictLogged;
++    private boolean disabledByCore;
++
++    private boolean enabled = true;
++    private int intervalTicks = 10;
++    private int joinGraceTicks = 60;
++    private double minDistance = 2.0;
++    private double maxDistance = 96.0;
++    private boolean hideSpectators = true;
++    private boolean hideInvisible = true;
++    private boolean onlyIfCoreInactive = true;
++
++    AntiEspManager(JavaPlugin plugin, Logger log) {
++        this.plugin = plugin;
++        this.log = log;
++    }
++
++    /** Перечитывается из конфига; вызывать из onEnable и по /vac reload. */
++    void configure(boolean enabled, int intervalTicks, int joinGraceTicks,
++                   double minDistance, double maxDistance,
++                   boolean hideSpectators, boolean hideInvisible,
++                   boolean onlyIfCoreInactive) {
++        boolean wasRunning = task != null;
++        this.enabled = enabled;
++        this.intervalTicks = Math.max(2, intervalTicks);
++        this.joinGraceTicks = Math.max(0, joinGraceTicks);
++        this.minDistance = Math.max(0.0, minDistance);
++        this.maxDistance = Math.max(this.minDistance, maxDistance);
++        this.hideSpectators = hideSpectators;
++        this.hideInvisible = hideInvisible;
++        this.onlyIfCoreInactive = onlyIfCoreInactive;
++        if (wasRunning) {
++            // Перезапуск с новыми числами; сначала честно вернуть всё, что скрыли.
++            stop(true);
++        }
++        start();
++    }
++
++    /**
++     * Второй Anti-ESP (ядро) уже владеет hide/show. Берём это из факта
++     * присутствия плагина, а не из догадок: если {@code PurpurBedrockAC} стоит
++     * и его Anti-ESP включён в конфиге, мы не вмешиваемся.
++     */
++    private boolean coreOwnsVisibility() {
++        var core = Bukkit.getPluginManager().getPlugin("PurpurBedrockAC");
++        if (core == null) {
++            return false;
++        }
++        try {
++            // У ядра это Class.forName-конфиг плагина, файл plugins/PurpurBedrockAC/config.yml.
++            java.io.File file = new java.io.File(core.getDataFolder(), "config.yml");
++            if (!file.isFile()) {
++                return true; // плагин есть, конфиг ещё не создан — считаем, что владеет он
++            }
++            org.bukkit.configuration.file.YamlConfiguration config =
++                    org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(file);
++            return config.getBoolean("protection.anti-esp.enabled", true);
++        } catch (Throwable ignored) {
++            return true;
++        }
++    }
++
++    void start() {
++        if (!enabled) {
++            return;
++        }
++        if (onlyIfCoreInactive && coreOwnsVisibility()) {
++            disabledByCore = true;
++            if (!coreConflictLogged) {
++                coreConflictLogged = true;
++                log.info("Anti-ESP: владельцем видимости уже является ядро "
++                        + "(PurpurBedrockAC protection.anti-esp.enabled=true) — "
++                        + "модуль VAC не запускается, чтобы не было мигания игроков. "
++                        + "Нужен Anti-ESP здесь — выключи его в ядре и поставь "
++                        + "anti-esp.only-if-core-inactive: false");
++            }
++            return;
++        }
++        disabledByCore = false;
++        task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, intervalTicks, intervalTicks);
++    }
++
++    void stop(boolean reveal) {
++        if (task != null) {
++            task.cancel();
++            task = null;
++        }
++        if (reveal) {
++            revealAll();
++        }
++        states.clear();
++        bypassWarned.clear();
++    }
++
++    /** Новый игрок: не трогаем пары в первые секунды, пока клиент грузит мир. */
++    private long readyAt(UUID uuid) {
++        return joinGraceUntil.getOrDefault(uuid, 0L);
++    }
++
++    void onJoin(Player player) {
++        joinGraceUntil.put(player.getUniqueId(), System.currentTimeMillis() + joinGraceTicks * 50L);
++        // Свежий серверный Player — старое состояние пар недействительно.
++        states.keySet().removeIf(pair -> pair.viewer().equals(player.getUniqueId())
++                || pair.target().equals(player.getUniqueId()));
++    }
++
++    void onQuit(Player player) {
++        UUID id = player.getUniqueId();
++        joinGraceUntil.remove(id);
++        revealForTarget(id);
++        states.keySet().removeIf(pair -> pair.viewer().equals(id) || pair.target().equals(id));
++    }
++
++    private void revealForTarget(UUID targetId) {
++        var target = Bukkit.getEntity(targetId);
++        for (var entry : states.entrySet()) {
++            if (!entry.getKey().target().equals(targetId) || !entry.getValue().hidden) {
++                continue;
++            }
++            Player viewer = Bukkit.getPlayer(entry.getKey().viewer());
++            // Показываем без проверки canSee: скрытие наше, поэтому canSee == false
++            // именно из-за нас — этим условием игрок остался бы невидимым навсегда.
++            if (viewer != null && target != null) {
++                viewer.showEntity(plugin, target);
++            }
++            entry.getValue().hidden = false;
++        }
++    }
++
++    private void revealAll() {
++        for (var entry : states.entrySet()) {
++            if (!entry.getValue().hidden) {
++                continue;
++            }
++            Player viewer = Bukkit.getPlayer(entry.getKey().viewer());
++            var target = Bukkit.getEntity(entry.getKey().target());
++            // Без проверки canSee — см. комментарий в revealForTarget.
++            if (viewer != null && target != null) {
++                viewer.showEntity(plugin, target);
++            }
++            entry.getValue().hidden = false;
++        }
++    }
++
++    /** Полный сброс (reload/выключение): вернуть всем всё, что мы скрыли. */
++    void reset() {
++        revealAll();
++        states.clear();
++        joinGraceUntil.clear();
++    }
++
++    boolean running() {
++        return task != null;
++    }
++
++    boolean disabledByCore() {
++        return disabledByCore;
++    }
++
++    private void tick() {
++        long now = System.currentTimeMillis();
++        joinGraceUntil.entrySet().removeIf(entry -> entry.getValue() <= now);
++
++        var players = Bukkit.getOnlinePlayers();
++        Set<Pair> visited = new HashSet<>();
++
++        for (Player viewer : players) {
++            if (!viewer.isOnline() || viewer.isDead()) {
++                continue;
++            }
++            if (viewer.hasPermission("voidanticheat.bypass")) {
++                continue;
++            }
++            if (now < readyAt(viewer.getUniqueId())) {
++                continue;
++            }
++            UUID viewerId = viewer.getUniqueId();
++            String world = viewer.getWorld().getName().toLowerCase(Locale.ROOT);
++
++            for (Player target : players) {
++                if (target.getUniqueId().equals(viewerId)) {
++                    continue;
++                }
++                Pair pair = new Pair(viewerId, target.getUniqueId());
++                visited.add(pair);
++                Visibility state = states.computeIfAbsent(pair, key -> new Visibility());
++
++                // Чужое скрытие (Vanish, привилегии, другой плагин).
++                //
++                // Важно: canSee() == false и тогда, когда скрыли МЫ САМИ, поэтому
++                // проверять надо вместе с нашим состоянием. Иначе мы бы
++                // «забывали» собственное скрытие на следующем тике, теряли
++                // владение парой и оставляли игрока невидимым навсегда.
++                if (!state.hidden && !viewer.canSee(target)) {
++                    continue; // скрывает кто-то другой — не вмешиваемся
++                }
++                if (now < readyAt(target.getUniqueId())) {
++                    continue;
++                }
++
++                boolean shouldHide = shouldHide(viewer, target, world);
++                if (shouldHide && !state.hidden) {
++                    viewer.hideEntity(plugin, target);
++                    state.hidden = true;
++                } else if (!shouldHide && state.hidden) {
++                    viewer.showEntity(plugin, target);
++                    state.hidden = false;
++                }
++            }
++        }
++
++        // Пары, которые больше не встречаются (смена мира/выход) — отпускаем.
++        states.entrySet().removeIf(entry -> {
++            if (visited.contains(entry.getKey())) {
++                return false;
++            }
++            if (entry.getValue().hidden) {
++                Player viewer = Bukkit.getPlayer(entry.getKey().viewer());
++                var target = Bukkit.getEntity(entry.getKey().target());
++                if (viewer != null && target != null) {
++                    viewer.showEntity(plugin, target);
++                }
++            }
++            return true;
++        });
++    }
++
++    /**
++     * Игрок, который сейчас работает с серверным GUI (сундук, магазин
++     * DeluxeMenus, меню VoidShulker/кейсов), не должен внезапно исчезать из
++     * мира: клиент может не перерисовать инвентарь, а в Bedrock это выглядит
++     * как зависшее меню. Пока инвентарь открыт — не трогаем пару.
++     */
++    private boolean busyWithMenu(Player target) {
++        try {
++            var open = target.getOpenInventory();
++            return open != null && open.getTopInventory() != null
++                    && !(open.getTopInventory().getType() == org.bukkit.event.inventory.InventoryType.CRAFTING);
++        } catch (Throwable ignored) {
++            return false;
++        }
++    }
++
++    private boolean shouldHide(Player viewer, Player target, String viewerWorld) {
++        if (!target.isOnline() || target.isDead()) {
++            return false;
++        }
++        if (busyWithMenu(target) || busyWithMenu(viewer)) {
++            return false;
++        }
++        if (!target.getWorld().getName().equalsIgnoreCase(viewerWorld)) {
++            return false;
++        }
++        if (hideSpectators && target.getGameMode() == org.bukkit.GameMode.SPECTATOR) {
++            return true;
++        }
++        if (hideInvisible && target.isInvisible() && !target.isGlowing()) {
++            return true;
++        }
++        double distance;
++        try {
++            distance = viewer.getLocation().distance(target.getLocation());
++        } catch (Throwable differentWorld) {
++            return false;
++        }
++        if (distance > maxDistance) {
++            return true;
++        }
++        return distance < minDistance && minDistance > 0.0;
++    }
++}
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -0,0 +1,104 @@
++// Отдельный Gradle-плагин для ядра Purpurbedrock 26.2.
++//
++// Сборка сделана по образцу purpurbedrock-npc/build.gradle.kts из этого же
++// проекта: тот же toolchain (Java 25), те же репозитории и та же зависимость
++// на API ядра со scope compileOnly, чтобы API НЕ попадал внутрь JAR.
++//
++// Существующая Maven-сборка (pom.xml) сохранена без изменений — этот файл
++// добавляет второй, эквивалентный способ сборки под локальный API ядра.
++//
++// Версия API: по умолчанию 26.2-R0.1-SNAPSHOT — именно её публикует
++// `./gradlew :purpur-api:publishToMavenLocal` из этого ядра
++// (gradle.properties: mcVersion = 26.2). Переопределяется так:
++//   ./gradlew build -PpurpurVersion="$(ls ~/.m2/repository/org/purpurmc/purpur/purpur-api)"
++
++plugins {
++    java
++}
++
++group = "ru.voidpe"
++version = "2.0.4"
++description = "VoidAntiCheat — античит для Bedrock-игроков Purpurbedrock 26.2"
++
++// Версия API. Читается ИМЕННО из -PpurpurVersion / gradle.properties:
++//   ./gradlew build -PpurpurVersion=26.2-R0.1-SNAPSHOT
++// Если свойство не передано — используется версия, которую публикует это ядро
++// (gradle.properties: mcVersion = 26.2  ->  26.2-R0.1-SNAPSHOT).
++// Проверить, что свойство реально видно сборке:
++//   ./gradlew -q properties -PpurpurVersion=X | grep '^version:'
++val purpurApiVersion = providers.gradleProperty("purpurVersion").orElse("26.2-R0.1-SNAPSHOT")
++
++// Задача-проверка: печатает фактическую координату API. Позволяет убедиться,
++// что -PpurpurVersion реально прочитан, не запуская компиляцию:
++//   ./gradlew -q printApiVersion -PpurpurVersion=26.2-R0.1-SNAPSHOT
++tasks.register("printApiVersion") {
++    doLast {
++        println("[VoidAntiCheat] org.purpurmc.purpur:purpur-api:${purpurApiVersion.get()} (compileOnly)")
++    }
++}
++
++java {
++    toolchain {
++        languageVersion.set(JavaLanguageVersion.of(25))
++    }
++}
++
++repositories {
++    // Локальный API, опубликованный из ядра: :purpur-api:publishToMavenLocal
++    mavenLocal()
++    maven("https://repo.purpurmc.org/snapshots")
++    maven("https://repo.papermc.io/repository/maven-public/")
++    mavenCentral()
++}
++
++dependencies {
++    // Только для компиляции: внутрь JAR не попадает.
++    // Пустое/пробельное значение -PpurpurVersion ломает резолв — проверяем явно.
++    val apiVersion = purpurApiVersion.get().trim()
++    require(apiVersion.isNotEmpty()) { "-PpurpurVersion не может быть пустым" }
++    compileOnly("org.purpurmc.purpur:purpur-api:$apiVersion")
++}
++
++tasks.withType<JavaCompile> {
++    options.encoding = Charsets.UTF_8.name()
++    options.release.set(25)
++    options.compilerArgs.addAll(listOf("-Xlint:-deprecation", "-Xlint:-removal"))
++}
++
++// Ресурсы не фильтруются: версия в plugin.yml — литерал, как в
++// purpurbedrock-npc и purpurbedrock-anticheat этого проекта. Это снимает
++// зависимость от `expand`/`filter` (в Gradle 9 `expand` устарел) и исключает
++// ситуацию, когда в JAR уезжает незаменённый плейсхолдер.
++tasks.processResources {
++    filteringCharset = Charsets.UTF_8.name()
++}
++
++tasks.jar {
++    archiveBaseName.set("VoidAntiCheat")
++    archiveVersion.set(project.version.toString())
++    // Ничего лишнего: в JAR только свои классы и ресурсы. Явный from(...)
++    // здесь не нужен — main-вывод попадает в jar автоматически, а повторное
++    // добавление давало бы дубли записей.
++}
++
++// Проверка, что API не попал в артефакт: если кто-то случайно заменит
++// compileOnly на implementation, сборка упадёт здесь, а не на сервере.
++tasks.register("verifyNoApiInJar") {
++    dependsOn(tasks.jar)
++    doLast {
++        val jarFile = tasks.jar.get().archiveFile.get().asFile
++        java.util.zip.ZipFile(jarFile).use { zip ->
++            val leaked = zip.entries().asSequence()
++                .map { it.name }
++                .filter { it.startsWith("org/purpurmc/") || it.startsWith("org/bukkit/") || it.startsWith("io/papermc/") }
++                .toList()
++            if (leaked.isNotEmpty()) {
++                throw GradleException("В JAR попал API сервера: ${leaked.take(5)}")
++            }
++        }
++    }
++}
++
++tasks.build {
++    dependsOn("verifyNoApiInJar")
++}
+--- a/settings.gradle.kts
++++ b/settings.gradle.kts
+@@ -0,0 +1,8 @@
++pluginManagement {
++    repositories {
++        gradlePluginPortal()
++        maven("https://repo.papermc.io/repository/maven-public/")
++    }
++}
++
++rootProject.name = "VoidAntiCheat"

@@ -1,0 +1,90 @@
+name: VoidAntiCheat
+version: "2.0.4"
+main: ru.voidpe.anticheat.VoidAntiCheat
+api-version: '26.2'
+author: VoidPE
+description: "Bedrock-only античит VoidPE 2.0: буферы улик, компенсация лагов по джиттеру, предсказание вертикали, rewind-reach, широкие исключения и отключённые по умолчанию наказания."
+softdepend: [Floodgate, Geyser-Spigot, WorldGuard]
+commands:
+  vac:
+    description: "VoidAntiCheat: статус, алерты, VL игрока, сброс, setback, проверки, миры, reload"
+    usage: |
+      /vac — статус античита
+      /vac info <игрок> — VL, сеть, устройство и ввод игрока
+      /vac alerts — вкл/выкл алерты себе
+      /vac reset <игрок> [проверка] — сбросить VL
+      /vac setback <игрок> — вернуть на безопасную точку
+      /vac check [проверка] [on|off] — вкл/выкл проверку на лету
+      /vac world list|add|remove|only|clear-only [маска] — миры исключений
+      /vac reload — перечитать config.yml
+      /vac help [команда] — справка
+    aliases: [voidac, anticheat]
+permissions:
+  voidanticheat.admin:
+    description: "Все команды /vac: справка, статус, info, reset, setback, check, world, reload"
+    default: op
+    children:
+      voidanticheat.alerts: true
+  voidanticheat.alerts:
+    description: Получать алерты VoidAntiCheat
+    default: op
+  voidanticheat.bypass:
+    description: Полный обход всех проверок VoidAntiCheat
+    default: false
+  voidanticheat.bypass.speed:
+    description: Обход проверки Speed
+    default: false
+  voidanticheat.bypass.fly:
+    description: Обход проверки Fly
+    default: false
+  voidanticheat.bypass.timer:
+    description: Обход проверки Timer
+    default: false
+  voidanticheat.bypass.reach:
+    description: Обход проверки Reach
+    default: false
+  voidanticheat.bypass.killaura:
+    description: Обход проверки KillAura
+    default: false
+  voidanticheat.bypass.step:
+    description: Обход проверки step
+    default: false
+  voidanticheat.bypass.jesus:
+    description: Обход проверки jesus
+    default: false
+  voidanticheat.bypass.spider:
+    description: Обход проверки spider
+    default: false
+  voidanticheat.bypass.elytra:
+    description: Обход проверки elytra
+    default: false
+  voidanticheat.bypass.vehicle:
+    description: Обход проверки vehicle
+    default: false
+  voidanticheat.bypass.velocity:
+    description: Обход проверки velocity
+    default: false
+  voidanticheat.bypass.nofall:
+    description: Обход проверки nofall
+    default: false
+  voidanticheat.bypass.autoclicker:
+    description: Обход проверки autoclicker
+    default: false
+  voidanticheat.bypass.fastbreak:
+    description: Обход проверки fastbreak
+    default: false
+  voidanticheat.bypass.fastplace:
+    description: Обход проверки fastplace
+    default: false
+  voidanticheat.bypass.scaffold:
+    description: Обход проверки scaffold
+    default: false
+  voidanticheat.bypass.blockreach:
+    description: Обход проверки blockreach
+    default: false
+  voidanticheat.bypass.badpackets:
+    description: Обход проверки badpackets
+    default: false
+  voidanticheat.bypass.noclip:
+    description: Обход проверки noclip
+    default: false

@@ -1,0 +1,539 @@
+# ============================================================
+#  VoidAntiCheat 2.0 — античит VoidPE ТОЛЬКО для Bedrock (Geyser/Floodgate)
+#
+#  Что изменилось в 2.0 (главная цель — НОЛЬ ложных жалоб):
+#   • Улики вместо мгновенных штрафов. У каждой проверки есть буфер:
+#     одно подозрительное событие не даёт VL. Повторы внутри
+#     sample-gap весят вчетверо меньше, поэтому лаг-спайк с пачкой
+#     пакетов не превращается в серию нарушений.
+#   • Наказание требует: VL выше порога несколько секунд, несколько
+#     разных проверок, нормальный пинг и TPS. По умолчанию автокик и
+#     автобан ВЫКЛЮЧЕНЫ (auto-punish: false, punishments.commands: []).
+#   • Компенсация лагов по джиттеру move-пакетов (пинг Bedrock через
+#     Geyser часто 0). На шумном канале пороги растут, улика весит меньше.
+#   • Широкие исключения: вода, паутина, порошковый снег, лёд, слизень,
+#     мёд, сено, лестницы/лианы, леса, транспорт, элитра, Levitation,
+#     Slow Falling, Riptide, поршни, взрывы, недавний урон, опора под
+#     ногами (в т.ч. лодка/моб под игроком).
+#   • Предсказание вертикали (гравитация/сопротивление) вместо «серий
+#     по счётчику»: Fly ловится только при наборе > 3.4 блоков в воздухе
+#     без прыжка/эффектов или зависании > 2 секунд. Jump Boost II (~2.6)
+#     и спринт-прыжки Bedrock проходят.
+#   • Совместимость с VoidPvP: плагин без кд атаки определяется сам, и
+#     тогда сырой CPS не считается автокликером (только ровность кликов).
+#   • Reach с перемоткой: удар сверяется с историей хитбокса цели,
+#     допуск растёт от пинга, скорости цели и джиттера.
+#
+#  Режимы:
+#   • settings.enforcement: false — вообще ничего не отменяет и не
+#     телепортирует, только считает VL и пишет алерты (режим наблюдения).
+#   • settings.auto-punish: false — кики/баны не выполняются.
+#  Рекомендация на старт: оставить как есть, неделю смотреть алерты,
+#  затем при желании включить auto-punish и добавить команды ниже.
+# ============================================================
+
+settings:
+  enabled: true
+  # Проверять только Bedrock/Floodgate. На этом сервере Java запрещена,
+  # поэтому при недоступном Floodgate ниже есть безопасный fallback.
+  bedrock-only: true
+  # Если Floodgate API не нашлась: true = проверять всех (сервер Bedrock-only),
+  # false = никого не проверять до установки Floodgate.
+  check-all-if-floodgate-missing: true
+  # --- Где античит молчит ---
+  # Миры, имена которых поддерживают маски (пересобирать jar не нужно):
+  #   world            точное имя
+  #   arena-*          всё, что начинается с arena-
+  #   *_test           всё, что заканчивается на _test
+  #   lobby?           ? заменяет ровно один символ
+  # Регистр не важен. Примеры:
+  #   excluded-worlds: [arena-*, "_test", world_the_end]
+  excluded-worlds: []
+  # Обратный режим: проверять ТОЛЬКО эти миры (тоже с масками).
+  # Пусто = проверяются все миры, кроме excluded-worlds.
+  only-worlds: []
+  excluded-worldguard-regions: []
+
+  # --- Слои: детект → коррекция → наказание ---
+  # false = только алерты и статистика, без cancel/setback.
+  enforcement: true
+  # true + punishments.commands = реальные кики/баны. По умолчанию выключено.
+  auto-punish: false
+  # true, если на сервере есть плагин без кд атаки (VoidPvP определяется сам):
+  # тогда сырой CPS не считается автокликером, проверяется только ровность.
+  fast-attack-server: false
+  # Ядро Purpurbedrock отключает кулдаун атаки для Bedrock на уровне NMS
+  # (gameplay-mechanics.bedrock-combat.enabled, по умолчанию true). Тогда
+  # высокая частота ударов — штатная механика сервера, а не чит: сырой CPS
+  # не считается автокликером, проверяется только ровность интервалов.
+  # false — игнорировать настройку ядра и считать CPS как на Java.
+  core-zero-attack-cooldown: true
+  # Наказание только если VL держался выше порога столько секунд.
+  punish-min-above-seconds: 20
+  # Наказание только при нескольких активных проверках сразу.
+  punish-min-distinct-checks: 2
+  punish-max-ping: 400
+  punish-min-tps: 17.0
+  # Повторное наказание той же проверки не чаще, чем раз в N секунд.
+  punish-cooldown-seconds: 60
+
+  # Коррекция тоже требует устойчивости, а не одного выброса.
+  setback-sustain-ms: 700
+  cancel-sustain-ms: 250
+  setback-cooldown-ms: 900
+  cancel-cooldown-ms: 400
+
+  # Как часто одна проверка может положить в буфер полную улику.
+  # Более частые события весят x0.25.
+  sample-gap-movement-ms: 220
+  sample-gap-combat-ms: 120
+  sample-gap-block-ms: 80
+
+  # Ниже этого TPS проверки движения не штрафуют: сервер сам отстаёт.
+  min-tps-for-movement: 16.0
+  # Через сколько секунд чистой игры полностью сбрасываются VL и буферы.
+  vl-reset-clean-seconds: 90
+
+  # Грейсы после событий, которые легально меняют движение, миллисекунды.
+  join-grace-ms: 3500
+  teleport-grace-ms: 1750
+  respawn-grace-ms: 3500
+  world-change-grace-ms: 2500
+  velocity-grace-ms: 900
+  # Грейс, когда позиция сервера разошлась с ожидаемой (телепорт плагина,
+  # коррекция ядра, вход в данж/зону RTP). Такое событие не считается
+  # движением игрока вовсе, грейс — только чтобы не «догонять» его в следующем.
+  unsynced-grace-ms: 600
+  damage-grace-ms: 500
+  piston-grace-ms: 1200
+  piston-grace-radius: 4.0
+  explosion-grace-ms: 1200
+  explosion-grace-radius: 10.0
+  riptide-grace-ms: 1500
+  block-change-grace-ms: 1500
+
+  # Дополнительный допуск специально для Bedrock-клиентов (Geyser/тач).
+  bedrock-extra-tolerance: 0.04
+  bedrock-reach-extra-blocks: 0.10
+
+  # Алерты персоналу: кулдаун одинаковых алертов по игроку+проверке.
+  alert-cooldown-ms: 2500
+  alert-min-vl: 1.0
+  log-console: true
+  log-file: true
+  staff-alerts: true
+  debug: false
+
+# ============================================================
+#  Anti-ESP
+#
+#  Скрывает от клиента игроков, которых не должно быть видно: наблюдателей,
+#  невидимых, слишком далёких. Это профилактика против ESP/Wallhack-паков
+#  (Apollon/Horion/Toolbox), а НЕ доказательство чита: VL за это не начисляется.
+#
+#  ВАЖНО: в ядре Purpurbedrock уже есть свой Anti-ESP (плагин PurpurBedrockAC,
+#  protection.anti-esp). Два владельца видимости = мигание игроков и лишние
+#  пакеты. Поэтому по умолчанию модуль не запускается, если Anti-ESP ядра
+#  активен. Хочешь вести его здесь — выключи его в ядре и поставь
+#  only-if-core-inactive: false.
+# ============================================================
+anti-esp:
+  enabled: false
+  # only-if-core-inactive: true — не запускаться, если ядро владеет видимостью.
+  only-if-core-inactive: true
+  # Как часто пересчитывать (тики). 10 = дважды в секунду; чаще не нужно,
+  # пары со стабильным состоянием не трогаются вообще.
+  interval-ticks: 10
+  # Не трогать новых игроков первые N тиков (клиент грузит мир).
+  join-grace-ticks: 60
+  # Ближе этого скрывать нельзя (0 — не скрывать вблизи).
+  min-distance: 0.0
+  # Дальше этого — скрывать (обычно больше дистанции прорисовки бесполезно).
+  max-distance: 96.0
+  hide-spectators: true
+  hide-invisible: true
+
+# Компенсация сети. Джиттер считается по интервалам move-пакетов, потому
+# что player.getPing() у Bedrock через Geyser часто равен 0.
+compensation:
+  # Если пинг неизвестен (Player.getPing() == 0 — обычное дело у Bedrock через
+  # Geyser, и Geyser-сессия тоже недоступна), считать его таким, а не нулевым.
+  # Ноль обнулял бы окно перемотки и допуск, то есть «неизвестно» наказывалось
+  # бы строже, чем измеренный пинг.
+  unknown-ping-assumed-ms: 120
+  # Прибавка к допуску за каждые 100 мс пинга и её предел.
+  ping-factor-per-100ms: 0.020
+  max-ping-factor: 0.12
+  # Прибавка за каждый мс джиттера и её предел.
+  jitter-factor-per-ms: 0.0012
+  max-jitter-factor: 0.30
+  # Прибавка за каждый недостающий до 20 TPS пункт и её предел.
+  tps-factor-per-point: 0.05
+  max-tps-factor: 0.45
+  # Интервал между пакетами больше этого = лаг-спайк.
+  spike-interval-ms: 900
+  # Сколько мс после спайка не применяем setback и режем улики.
+  unstable-hold-ms: 2500
+
+# Команды наказания. Выполняются от консоли при punish-vl проверки,
+# НО только если settings.auto-punish: true и соблюдены все условия выше.
+# Плейсхолдеры: %player%, %check%, %vl%, %max_vl%, %details%, %ping%, %tps%, %world%
+# Пример (раскомментируй осознанно):
+# punishments:
+#   commands:
+#     - "kick %player% VoidAntiCheat: подозрительная активность (%check%, VL %vl%)"
+punishments:
+  commands: []
+
+# Необязательный Discord webhook по высоким VL. Пусто = выключено.
+webhook:
+  enabled: false
+  url: ""
+  min-vl: 10.0
+
+movement:
+  # Speed token bucket: разовый рывок допускается, улика — за устойчивый перерасход.
+  speed-burst-blocks: 1.60
+  speed-token-cap: 4.5
+  # Пакет после паузы дольше этого — «наверстывание» после лага, не чит.
+  speed-lag-skip-seconds: 0.60
+  # Dolphin's Grace в воде разгоняет до ~9.6 бл/с.
+  dolphins-grace-bps: 10.0
+  # Множители допустимой скорости на льду.
+  ice-factor: 1.70
+  packed-ice-factor: 1.95
+  blue-ice-factor: 2.35
+  frosted-ice-factor: 1.45
+  # Один move-пакет дальше этого без телепорта считается невозможным.
+  teleport-delta-blocks: 24.0
+  # Timer: position-движений к серверным тикам за окно.
+  # Bedrock/Geyser может присылать пачки пакетов, поэтому порог высокий
+  # (x1.5) и нужно 3 окна подряд: ложный Timer дороже пропущенного.
+  timer-ratio: 1.50
+  timer-extra-packets: 40
+  timer-window-ticks: 100
+  timer-windows: 3
+  # Fly: предсказание вертикали. Jump Boost II даёт ~2.6 бл, поэтому порог 3.4.
+  fly-ascent-blocks: 3.4
+  # Серверное вертикальное velocity выше этого — подброс плагином/винд-чаржем/
+  # riptide/поршнем: вертикальные проверки на время импульса отключаются.
+  server-launch-velocity-y: 0.22
+  fly-hover-ticks: 40
+  # NoFall / Step / Jesus / Spider / NoClip.
+  nofall-min-drop: 5.0
+  nofall-server-fall-ratio: 0.30
+  step-min-dy: 1.02
+  jesus-ticks: 9
+  climb-ticks: 10
+  noclip-ticks: 4
+  # Медленное падение (антигравитация) — серия тиков.
+  slow-fall-ticks: 8
+
+combat:
+  # Дистанция от глаза до БЛИЖАЙШЕЙ точки хитбокса цели.
+  reach-max-blocks: 3.45
+  # На тач-вводе Bedrock серверная картина атаки чуть шумнее.
+  reach-touch-max-blocks: 3.65
+  # Дальше этого удар физически невозможен: отменяется (при enforcement).
+  reach-hard-cancel-blocks: 4.80
+  # Компенсация пинга атакующего и цели, блоков за 100 мс.
+  reach-ping-comp-per-100ms: 0.045
+  reach-ping-comp-max-blocks: 0.45
+  # Компенсация движения цели: блоков на каждый бл/с её скорости.
+  reach-move-comp-per-bps: 0.02
+  reach-move-comp-max-blocks: 0.35
+  # Окно перемотки хитбокса цели.
+  reach-rewind-max-ms: 800
+  # Предел общего множителя допуска reach от джиттера/TPS.
+  reach-max-tolerance: 1.30
+  # KillAura — только грубые серии, не одиночные удары.
+  killaura-multi-targets: 5
+  # На ядре с Bedrock-боёвкой (нулевой кд атаки + отключённый
+  # Java-sweep) серия ударов по толпе мобов — штатная механика.
+  # Порог поднимается только если ядро реально включает bedrock-combat.
+  killaura-multi-targets-bedrock-combat: 9
+  killaura-window-ms: 1000
+  killaura-wall-min-distance: 1.90
+  killaura-wall-max-ping: 320
+  # AutoClicker. Удержание на тач-вводе даёт ровный ритм — это не чит,
+  # поэтому ровность проверяется только для мыши/геймпада.
+  autoclicker-cps: 24
+  autoclicker-touch-cps: 27
+  # Сколько окон подряд выше лимита нужно для улики.
+  autoclicker-high-windows: 2
+  autoclicker-consistent-min-cps: 26.0
+  autoclicker-consistent-max-deviation-ms: 1.0
+  autoclicker-sample-clicks: 32
+  # Velocity/AntiKB: сверка ожидаемого нокбэка с фактическим перемещением.
+  velocity-check-ticks: 5
+  velocity-min-expected-blocks: 1.10
+  velocity-min-travel-ratio: 0.30
+
+world:
+  fastbreak-per-second: 28
+  fastbreak-same-tick: 4
+  # Бур VoidEnchants ломает 3x3/3x3x2 серверным расширением: такие разрушения
+  # не считаются отдельными действиями игрока. Источник — ключ drill в PDC
+  # инструмента (namespace voidenchants), подделать с клиента нельзя.
+  fastbreak-server-multiblock-exempt: true
+  fastplace-per-second: 28
+  fastplace-same-tick: 4
+  # Рука до блока: survival vanilla ~4.5, порог с Bedrock запасом.
+  blockreach-max-blocks: 6.20
+  blockreach-hard-cancel-blocks: 7.00
+  # Scaffold: блоки строго под ногами на скорости, не крадучись и серией.
+  scaffold-window-ms: 5000
+  scaffold-places-in-window: 4
+  scaffold-min-speed-bps: 3.0
+  scaffold-max-pitch: 55.0
+
+elytra:
+  climb-dy-per-tick: 0.62
+  climb-ticks: 6
+  max-horizontal-bps: 118.0
+  boost-grace-ms: 4000
+
+vehicle:
+  # Лодки на льду очень быстрые — отдельные лимиты по поверхности под лодкой.
+  water-max-bps: 16.0
+  ground-max-bps: 14.0
+  ice-max-bps: 34.0
+  packed-ice-max-bps: 40.0
+  blue-ice-max-bps: 48.0
+  burst-blocks: 3.0
+
+# Общие значения, если у конкретной проверки поле не задано.
+# buffer — сколько очков улик нужно, чтобы получить первый VL.
+# 2.5 при sample-gap 220 мс = примерно 3 устойчивых события.
+checks:
+  default:
+    enabled: true
+    max-vl: 20.0
+    decay-per-second: 0.12
+    buffer: 2.5
+    setback-vl: 0.0
+    cancel-vl: 0.0
+    punish-vl: 0.0
+
+  speed:
+    enabled: true
+    max-vl: 25.0
+    decay-per-second: 0.16
+    buffer: 2.5
+    setback-vl: 9.0
+    punish-vl: 25.0
+  fly:
+    enabled: true
+    max-vl: 22.0
+    decay-per-second: 0.15
+    buffer: 2.5
+    setback-vl: 7.0
+    punish-vl: 22.0
+  timer:
+    enabled: true
+    max-vl: 24.0
+    decay-per-second: 0.10
+    buffer: 3.0
+    punish-vl: 24.0
+  nofall:
+    enabled: true
+    max-vl: 18.0
+    decay-per-second: 0.12
+    buffer: 2.0
+    punish-vl: 18.0
+  step:
+    enabled: true
+    max-vl: 18.0
+    decay-per-second: 0.14
+    buffer: 2.0
+    setback-vl: 8.0
+    punish-vl: 18.0
+  jesus:
+    enabled: true
+    max-vl: 20.0
+    decay-per-second: 0.14
+    buffer: 2.0
+    setback-vl: 8.0
+    punish-vl: 20.0
+  spider:
+    enabled: true
+    max-vl: 20.0
+    decay-per-second: 0.14
+    buffer: 2.5
+    setback-vl: 8.0
+    punish-vl: 20.0
+  elytra:
+    enabled: true
+    max-vl: 20.0
+    decay-per-second: 0.14
+    buffer: 2.5
+    punish-vl: 20.0
+  vehicle:
+    enabled: true
+    max-vl: 20.0
+    decay-per-second: 0.14
+    buffer: 2.5
+    punish-vl: 20.0
+  velocity:
+    enabled: true
+    max-vl: 20.0
+    decay-per-second: 0.10
+    buffer: 2.5
+    punish-vl: 20.0
+  reach:
+    enabled: true
+    max-vl: 16.0
+    decay-per-second: 0.15
+    buffer: 2.0
+    cancel-vl: 10.0
+    punish-vl: 16.0
+  killaura:
+    enabled: true
+    max-vl: 16.0
+    decay-per-second: 0.12
+    buffer: 2.5
+    cancel-vl: 12.0
+    punish-vl: 16.0
+  autoclicker:
+    enabled: true
+    max-vl: 20.0
+    decay-per-second: 0.10
+    buffer: 3.0
+    punish-vl: 20.0
+  fastbreak:
+    enabled: true
+    max-vl: 18.0
+    decay-per-second: 0.14
+    buffer: 2.0
+    cancel-vl: 8.0
+    punish-vl: 18.0
+  fastplace:
+    enabled: true
+    max-vl: 18.0
+    decay-per-second: 0.14
+    buffer: 2.0
+    cancel-vl: 8.0
+    punish-vl: 18.0
+  scaffold:
+    enabled: true
+    max-vl: 18.0
+    decay-per-second: 0.10
+    buffer: 3.0
+    cancel-vl: 10.0
+    punish-vl: 18.0
+  blockreach:
+    enabled: true
+    max-vl: 14.0
+    decay-per-second: 0.16
+    buffer: 1.5
+    cancel-vl: 5.0
+    punish-vl: 14.0
+  badpackets:
+    enabled: true
+    max-vl: 12.0
+    decay-per-second: 0.08
+    # Физически невозможный пакет — сам по себе доказательство.
+    buffer: 0.0
+    cancel-vl: 1.0
+    punish-vl: 12.0
+  noclip:
+    enabled: true
+    max-vl: 20.0
+    decay-per-second: 0.10
+    buffer: 2.0
+    setback-vl: 12.0
+    punish-vl: 20.0
+
+messages:
+  prefix: "&#FF5555VoidAC &8» &f"
+  alert: "&c{player} &7подозрение на &f{check} &7VL &c{vl}&7/{max_vl} &8• &7{details} &8• &7пинг &f{ping}&7, джиттер &f{jitter}&7 мс, TPS &f{tps}"
+  alert-hover: "&7Игрок: &f{player}\n&7Проверка: &f{check}\n&7VL: &c{vl}&7/{max_vl}\n&7{details}\n&8Клик — /vac info"
+  no-permission: "&cТолько для администрации."
+  player-not-found: "&cИгрок не найден."
+  check-not-found: "&cНет такой проверки. Список: speed, fly, timer, nofall, step, jesus, spider, elytra, vehicle, velocity, reach, killaura, autoclicker, fastbreak, fastplace, scaffold, blockreach, badpackets, noclip"
+  reloaded: "&aVoidAntiCheat перезагружен."
+  alerts-on: "&aАлерты VoidAntiCheat включены."
+  alerts-off: "&cАлерты VoidAntiCheat выключены."
+  reset-done: "&aVL игрока &f{player} &aсброшены{scope}."
+  setback-done: "&aИгрок &f{player} &aвозвращён на последнюю безопасную точку."
+  no-safe-location: "&cУ игрока нет сохранённой безопасной точки."
+  status: "&7VoidAntiCheat: {state}&7, коррекция: &f{enforcement}&7, Bedrock/Floodgate: &f{floodgate}&7, игроков под наблюдением: &f{tracked}&7, TPS: &f{tps}"
+  state-on: "&#7CFC00включён"
+  state-off: "&cвыключен"
+  info-header: "&f{player} &7— Bedrock: &f{bedrock}&7, ввод: &f{input}&7, устройство: &f{device}&7, пинг: &f{ping}"
+  info-lag: "&7Сеть: интервал &f{interval}&7 мс, джиттер &f{jitter}&7 мс, допуск &f{tolerance}&7x"
+  info-none: "&7Активных VL нет."
+  info-line: "&7{check}: &c{vl}&7/{max_vl} &8(буфер {buffer})"
+  # Общая справка: /vac, /vac help и любой неизвестный ввод.
+  help:
+    - "&8&m        &r &fVoidAntiCheat &7— команды &8&m        "
+    - "&f/vac &8— статус античита"
+    - "&f/vac info &7<игрок> &8— VL, сеть, устройство, ввод"
+    - "&f/vac alerts &8— вкл/выкл алерты себе"
+    - "&f/vac reset &7<игрок> [проверка] &8— сбросить VL"
+    - "&f/vac setback &7<игрок> &8— вернуть на безопасную точку"
+    - "&f/vac check &7[проверка] [on|off] &8— вкл/выкл проверку на лету"
+    - "&f/vac world &7list|add|remove|only|clear-only &8— миры исключений"
+    - "&f/vac reload &8— перечитать config.yml"
+    - "&f/vac help &7[команда] &8— эта справка / помощь по команде"
+
+  # Строка «чего не хватает» перед справкой конкретной команды.
+  usage-format: "&cНе хватает аргументов: &f{usage}"
+  unknown-subcommand: "&cНеизвестная подкоманда: &f{sub}"
+
+  # Краткое использование для сообщения usage.
+  usage:
+    info: "/vac info <игрок>"
+    reset: "/vac reset <игрок> [проверка]"
+    setback: "/vac setback <игрок>"
+    check: "/vac check <проверка> [on|off]"
+    world: "/vac world list|add|remove|only|clear-only [маска]"
+    alerts: "/vac alerts"
+    reload: "/vac reload"
+    help: "/vac help [команда]"
+
+  # Своя справка для каждой команды (/vac help <команда> и при нехватке аргументов).
+  command:
+    info:
+      - "&f/vac info <игрок>"
+      - "&7  VL и буферы по всем проверкам, пинг, джиттер, допуск,"
+      - "&7  устройство и режим ввода игрока."
+      - "&7  Право: &fvoidanticheat.admin"
+    alerts:
+      - "&f/vac alerts"
+      - "&7  Включает или выключает алерты лично себе."
+      - "&7  Право: &fvoidanticheat.admin"
+    reset:
+      - "&f/vac reset <игрок> [проверка]"
+      - "&7  Без проверки — сбрасывает VL и буферы по всем проверкам."
+      - "&7  С проверкой — только по одной (см. /vac check)."
+      - "&7  Право: &fvoidanticheat.admin"
+    setback:
+      - "&f/vac setback <игрок>"
+      - "&7  Возвращает игрока на последнюю безопасную точку."
+      - "&7  Право: &fvoidanticheat.admin"
+    check:
+      - "&f/vac check [проверка] [on|off|status]"
+      - "&7  Без аргументов — список всех 19 проверок."
+      - "&7  С проверкой — её состояние; с on/off — переключение."
+      - "&7  Переключение живёт до /vac reload (файл — источник правды)."
+      - "&7  Право: &fvoidanticheat.admin"
+    world:
+      - "&f/vac world list &8— что сейчас в исключениях и whitelist"
+      - "&f/vac world add <маска> &8— добавить мир в исключения"
+      - "&f/vac world remove <маска> &8— убрать из исключений"
+      - "&f/vac world only <маска...> &8— проверять только эти миры"
+      - "&f/vac world clear-only &8— снять whitelist"
+      - "&7  Маски: &fworld&7, &farena-*&7, &f*_test&7, &flobby?"
+      - "&7  Изменения сразу пишутся в config.yml и применяются."
+      - "&7  Право: &fvoidanticheat.admin"
+    reload:
+      - "&f/vac reload"
+      - "&7  Перечитывает config.yml: пороги проверок, миры,"
+      - "&7  Anti-ESP, компенсацию сети. VL и буферы не сбрасываются."
+      - "&7  Право: &fvoidanticheat.admin"
+    help:
+      - "&f/vac help [команда]"
+      - "&7  Без аргумента — общий список команд."
+      - "&7  С аргументом — подробная справка по одной команде."
+      - "&7  Право: &fvoidanticheat.admin"
