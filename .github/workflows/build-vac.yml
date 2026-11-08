@@ -209,7 +209,15 @@ jobs:
           if "$MVN" -B package -DskipTests; then
             MJAR=$(ls target/VoidAntiCheat-*.jar 2>/dev/null | head -1)
             [ -n "$MJAR" ] || fail "MAVEN СОБРАЛ, НО JAR НЕ НАЙДЕН"
-            echo "MAVEN_STATUS=СОБРАН ($MJAR, $(stat -c '%s' "$MJAR") байт)" > "$STATUS"
+            # pom.xml использует опубликованный 26.2.build.2632-stable, а не
+            # локальную SNAPSHOT. Фиксируем, что реально резолвилось, и
+            # проверяем главное: API не упакован внутрь (scope provided).
+            ACTUAL_API=$(ls ~/.m2/repository/org/purpurmc/purpur/purpur-api | grep -v maven-metadata | tr '\n' ' ')
+            echo "purpur-api в ~/.m2: $ACTUAL_API"
+            LEAK=$(unzip -l "$MJAR" | grep -cE ' (org/bukkit|io/papermc|org/purpurmc)/' || true)
+            echo "классов API внутри Maven-JAR: $LEAK (ожидается 0)"
+            [ "$LEAK" = "0" ] || fail "В MAVEN-JAR ПОПАЛ API СЕРВЕРА ($LEAK файлов)"
+            echo "MAVEN_STATUS=СОБРАН ($MJAR, $(stat -c '%s' "$MJAR") байт; API: $ACTUAL_API; API в JAR: 0)" > "$STATUS"
             echo "MAVEN_OK"
           else
             ERR=$(grep -E "\[ERROR\]|BUILD FAILURE" /tmp/maven.log | head -4 | tr '\n' ' ')
