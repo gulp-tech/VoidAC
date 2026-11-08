@@ -211,7 +211,11 @@ jobs:
             echo "| Gradle | $(gradle --version | grep '^Gradle' | cut -d' ' -f2) |"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # Квота на artifacts в приватных репозиториях уже исчерпана
+      # ("Artifact storage quota has been hit"), поэтому загрузка не должна
+      # валить сборку: основной канал доставки — release-assets ниже.
       - name: Upload JAR artifact
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: VoidAntiCheat-26.2
