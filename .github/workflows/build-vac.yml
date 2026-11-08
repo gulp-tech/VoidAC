@@ -198,6 +198,8 @@ jobs:
       - name: Verify JAR contents and checksum
         id: verify
         working-directory: compat/VoidAntiCheat
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           JAR="${{ steps.build.outputs.JAR_PATH }}"
