@@ -60,7 +60,18 @@
          players.clear();
          alertsOff.clear();
      }
-@@ -326,10 +351,24 @@
+@@ -215,7 +240,9 @@
+      * метод принимает adventure {@code Key} — прямой вызов давал NoSuchMethodError
+      * и все проверки оставались на консервативных значениях по умолчанию.
+      */
+-    private static <T> T registryLookup(org.bukkit.Registry<T> registry, String... keys) {
++    // В 26.2 Registry объявлен как `Registry<T extends Keyed>`, поэтому без
++    // границы типа javac падает: "type argument T is not within bounds".
++    private static <T extends org.bukkit.Keyed> T registryLookup(org.bukkit.Registry<T> registry, String... keys) {
+         if (registry == null) {
+             return null;
+         }
+@@ -326,10 +353,24 @@
          } else {
              data.bedrock = confBool("settings.check-all-if-floodgate-missing", true);
          }
@@ -85,7 +96,7 @@
          data.profile = data.bedrock ? "bedrock" : "java";
          data.bypassAll = player.hasPermission("voidanticheat.bypass");
          data.excludedHere = isExcluded(player.getLocation());
-@@ -343,6 +382,26 @@
+@@ -343,6 +384,26 @@
          return data;
      }
  
@@ -112,7 +123,7 @@
      /** Только для тестов/диагностики: состояние без создания. */
      PlayerData peek(Player player) {
          return player == null ? null : players.get(player.getUniqueId());
-@@ -371,20 +430,109 @@
+@@ -371,20 +432,109 @@
          return mode == GameMode.SURVIVAL || mode == GameMode.ADVENTURE;
      }
  
@@ -226,7 +237,7 @@
      private boolean inGrace(PlayerData data) {
          return System.currentTimeMillis() < data.graceUntilMillis;
      }
-@@ -396,10 +544,16 @@
+@@ -396,10 +546,16 @@
      @EventHandler(priority = EventPriority.MONITOR)
      public void onJoin(PlayerJoinEvent event) {
          createData(event.getPlayer(), true);
@@ -243,7 +254,7 @@
          players.remove(event.getPlayer().getUniqueId());
          alertsOff.remove(event.getPlayer().getUniqueId());
      }
-@@ -410,6 +564,10 @@
+@@ -410,6 +566,10 @@
          if (event.getTo() != null) {
              grantGrace(data, confLong("settings.teleport-grace-ms", 1750L));
              data.resetMovement(event.getTo(), Bukkit.getCurrentTick(), System.nanoTime(), event.getPlayer().isOnGround());
@@ -254,7 +265,7 @@
              data.clearSustainAll();
              updateSafeLocation(event.getPlayer(), event.getTo(), data);
          }
-@@ -420,6 +578,7 @@
+@@ -420,6 +580,7 @@
          PlayerData data = data(event.getPlayer());
          grantGrace(data, confLong("settings.respawn-grace-ms", 3500L));
          data.resetMovement(event.getRespawnLocation(), Bukkit.getCurrentTick(), System.nanoTime(), true);
@@ -262,7 +273,7 @@
          data.safeLocation = event.getRespawnLocation().clone();
          data.clearSustainAll();
      }
-@@ -430,6 +589,7 @@
+@@ -430,6 +591,7 @@
          grantGrace(data, confLong("settings.world-change-grace-ms", 2500L));
          data.resetMovement(event.getPlayer().getLocation(), Bukkit.getCurrentTick(), System.nanoTime(),
                  event.getPlayer().isOnGround());
@@ -270,7 +281,7 @@
          data.clearSustainAll();
      }
  
-@@ -564,7 +724,7 @@
+@@ -564,7 +726,7 @@
  
          maybeAlert(player, data, check, cfg, state, details, now);
  
@@ -279,7 +290,7 @@
          long aboveSetback = cfg.setbackVl() > 0
                  ? state.aboveForMillis(VL_SUSTAIN_SETBACK, cfg.setbackVl(), now) : 0L;
          long aboveCancel = cfg.cancelVl() > 0
-@@ -774,11 +934,19 @@
+@@ -774,11 +936,19 @@
      }
  
      /** VoidPvP (или другой плагин без кд атаки) делает высокий CPS легальным. */
@@ -301,7 +312,7 @@
              if (fastAttackCache) {
                  getLogger().info("Обнаружен режим без кд атаки: сырой CPS не считается автокликером, "
                          + "проверяется только ровность интервалов.");
-@@ -787,6 +955,49 @@
+@@ -787,6 +957,49 @@
          return fastAttackCache;
      }
  
@@ -351,7 +362,7 @@
      private double currentTps() {
          double[] tps = Bukkit.getTPS();
          return tps.length == 0 ? 20.0 : Math.min(20.0, tps[0]);
-@@ -866,7 +1077,7 @@
+@@ -866,7 +1079,7 @@
                  || to.getPitch() < -90.5f || to.getPitch() > 90.5f
                  || to.getYaw() < -100_000f || to.getYaw() > 100_000f) {
              flag(player, data, CheckId.BADPACKETS, 2.0, "невозможные координаты/углы");
@@ -360,7 +371,7 @@
                  event.setTo(event.getFrom().clone());
              }
              data.resetMovement(event.getFrom(), tick, nowNanos, player.isOnGround());
-@@ -879,6 +1090,32 @@
+@@ -879,6 +1092,32 @@
              return;
          }
  
@@ -393,7 +404,7 @@
          double dx = to.getX() - data.lastX;
          double dy = to.getY() - data.lastY;
          double dz = to.getZ() - data.lastZ;
-@@ -903,8 +1140,13 @@
+@@ -903,8 +1142,13 @@
          if ((horizontal > teleportDelta || Math.abs(dy) > teleportDelta) && !inGrace(data)) {
              flag(player, data, CheckId.BADPACKETS, 2.0,
                      "скачок позиции " + formatVl(Math.max(horizontal, Math.abs(dy))) + " бл.");
@@ -409,7 +420,7 @@
              return;
          }
  
-@@ -952,7 +1194,10 @@
+@@ -952,7 +1196,10 @@
              noclipCheck(player, data, to, env, nowMillis);
          }
  
@@ -421,7 +432,7 @@
              Location safe = safeOr(data, to);
              event.setTo(safe);
              data.resetMovement(safe, tick, nowNanos, true);
-@@ -1494,7 +1739,7 @@
+@@ -1494,7 +1741,7 @@
          ReachVerdict verdict = measureReach(attacker, data, target, now);
          if (verdict.hard()) {
              flag(attacker, data, CheckId.REACH, 2.0, verdict.details());
@@ -430,7 +441,30 @@
                  event.setCancelled(true);
              }
          } else if (verdict.distance() > verdict.limit()) {
-@@ -1515,15 +1760,24 @@
+@@ -1510,20 +1757,47 @@
+      * Двусторонняя компенсация: минимальная дистанция по истории хитбокса
+      * цели за окно пинга + допуск от скорости цели, джиттера и тач-ввода.
+      */
++    /**
++     * Пинг для компенсации задержки при расчёте дальности удара.
++     *
++     * <p>Приоритет у ядра: реальный RakNet/NetherNet RTT Bedrock-сессии. Но
++     * {@code coreBridge.ping()} возвращает {@code -1}, когда живой сессии нет
++     * (плагин перезагружен, игрок ещё не авторизован), поэтому есть откат на
++     * {@code Player#getPing()}. Значение зажимается в разумные пределы: пинг
++     * участвует в лимитах, и аномалия не должна ни ужимать, ни раздувать допуск.
++     * </p>
++     */
++    private int effectivePing(Player player, PlayerData data) {
++        int ping = data == null ? -1 : data.sessionPing;
++        if (ping <= 0 && player != null) {
++            ping = player.getPing();
++        }
++        return Math.max(0, Math.min(ping, 2000));
++    }
++
+     private ReachVerdict measureReach(Player attacker, PlayerData data, LivingEntity target, long now) {
+         BoundingBox box = target.getBoundingBox();
          Vector eye = attacker.getEyeLocation().toVector();
          double current = boxDistance(eye, box);
  
@@ -457,7 +491,7 @@
                  ? confDouble("combat.reach-touch-max-blocks", 3.65)
                  : confDouble("combat.reach-max-blocks", 3.45);
          if (data.bedrock) {
-@@ -1534,7 +1788,7 @@
+@@ -1534,7 +1808,7 @@
              limit = Math.max(limit, interaction + 0.42);
          }
          double pingComp = Math.min(confDouble("combat.reach-ping-comp-max-blocks", 0.45),
@@ -466,7 +500,7 @@
                          * confDouble("combat.reach-ping-comp-per-100ms", 0.045));
          limit += pingComp;
          Vector targetVelocity = target.getVelocity();
-@@ -1543,7 +1797,7 @@
+@@ -1543,7 +1817,7 @@
          limit += Math.min(confDouble("combat.reach-move-comp-max-blocks", 0.35),
                  targetBps * confDouble("combat.reach-move-comp-per-bps", 0.02));
          double tolerance = Math.min(confDouble("combat.reach-max-tolerance", 1.30),
@@ -475,7 +509,7 @@
          limit *= tolerance;
  
          double hard = confDouble("combat.reach-hard-cancel-blocks", 4.80) * Math.min(1.15, tolerance);
-@@ -1578,10 +1832,23 @@
+@@ -1578,10 +1852,23 @@
              return;
          }
  
@@ -502,7 +536,7 @@
              flag(attacker, data, CheckId.KILLAURA, 1.0, distinct + " разных целей за 1 сек.");
              data.attacks.clear();
          }
-@@ -1645,11 +1912,15 @@
+@@ -1645,11 +1932,15 @@
                  lastSecond++;
              }
          }
@@ -520,7 +554,7 @@
          int maxCps = touch
                  ? confInt("combat.autoclicker-touch-cps", 27)
                  : confInt("combat.autoclicker-cps", 24);
-@@ -1711,11 +1982,21 @@
+@@ -1711,11 +2002,21 @@
          }
          long now = System.currentTimeMillis();
          data.lastBlockChangeMillis = now;
@@ -543,7 +577,7 @@
          if (data.lastBreakTick == tick) {
              data.breaksThisTick++;
          } else {
-@@ -1733,12 +2014,54 @@
+@@ -1733,12 +2034,54 @@
                      data.breaksThisTick >= sameTickLimit
                              ? data.breaksThisTick + " блоков за тик"
                              : data.breaks.size() + " блоков/сек");
@@ -599,7 +633,7 @@
      @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
      public void onBlockPlace(BlockPlaceEvent event) {
          Player player = event.getPlayer();
-@@ -1748,7 +2071,7 @@
+@@ -1748,7 +2091,7 @@
          }
          long now = System.currentTimeMillis();
          data.lastBlockChangeMillis = now;
@@ -608,7 +642,7 @@
              event.setCancelled(true);
              return;
          }
-@@ -1770,7 +2093,7 @@
+@@ -1770,7 +2113,7 @@
                      data.placesThisTick >= sameTickLimit
                              ? data.placesThisTick + " блоков за тик"
                              : data.places.size() + " блоков/сек");
@@ -617,7 +651,7 @@
                  event.setCancelled(true);
                  return;
              }
-@@ -1782,12 +2105,20 @@
+@@ -1782,12 +2125,20 @@
          Location center = block.getLocation().add(0.5, 0.5, 0.5);
          double distance = player.getEyeLocation().distance(center);
          double tolerance = data.lag.tolerance(player.getPing(), currentTps(), lagLimits);
@@ -641,7 +675,7 @@
          }
          if (distance > max) {
              return flag(player, data, CheckId.BLOCKREACH, 1.0,
-@@ -2035,6 +2366,160 @@
+@@ -2035,6 +2386,160 @@
          return sender.hasPermission("voidanticheat.admin");
      }
  
@@ -802,7 +836,7 @@
      @Override
      public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
          if (!admin(sender)) {
-@@ -2047,9 +2532,34 @@
+@@ -2047,9 +2552,34 @@
                  reloadConfig();
                  loadCheckSettings();
                  loadLagLimits();
@@ -837,7 +871,7 @@
              case "alerts" -> {
                  if (!(sender instanceof Player player)) {
                      sender.sendMessage(comp("&7Команда alerts доступна только игроку."));
-@@ -2064,7 +2574,11 @@
+@@ -2064,7 +2594,11 @@
                  return true;
              }
              case "info" -> {
@@ -850,7 +884,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2106,7 +2620,11 @@
+@@ -2106,7 +2640,11 @@
                  return true;
              }
              case "reset" -> {
@@ -863,7 +897,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2128,7 +2646,11 @@
+@@ -2128,7 +2666,11 @@
                  return true;
              }
              case "setback" -> {
@@ -876,7 +910,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2142,11 +2664,22 @@
+@@ -2142,11 +2684,22 @@
                  return true;
              }
              case "help" -> {
@@ -899,7 +933,7 @@
                      sendHelp(sender);
                      return true;
                  }
-@@ -2163,41 +2696,150 @@
+@@ -2163,41 +2716,150 @@
      }
  
      private void sendHelp(CommandSender sender) {
@@ -1915,7 +1949,9 @@
 +}
 --- a/build.gradle.kts
 +++ b/build.gradle.kts
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,119 @@
++import java.util.zip.ZipFile
++
 +// Отдельный Gradle-плагин для ядра Purpurbedrock 26.2.
 +//
 +// Сборка сделана по образцу purpurbedrock-npc/build.gradle.kts из этого же
@@ -2005,14 +2041,27 @@
 +    dependsOn(tasks.jar)
 +    doLast {
 +        val jarFile = tasks.jar.get().archiveFile.get().asFile
-+        java.util.zip.ZipFile(jarFile).use { zip ->
-+            val leaked = zip.entries().asSequence()
-+                .map { it.name }
-+                .filter { it.startsWith("org/purpurmc/") || it.startsWith("org/bukkit/") || it.startsWith("io/papermc/") }
-+                .toList()
-+            if (leaked.isNotEmpty()) {
-+                throw GradleException("В JAR попал API сервера: ${leaked.take(5)}")
++        // Две ловушки Kotlin DSL, обе проверены сборкой в CI:
++        //  1) `zip.entries().asSequence()` не выводит тип
++        //     (`Cannot infer type for type parameter 'T'`) — обходим Enumeration
++        //     явным циклом;
++        //  2) полное имя `java.util.zip.ZipFile` внутри скрипта не резолвится,
++        //     потому что `java` перекрыт расширением `java {}` — нужен import
++        //     в начале файла.
++        val leaked = mutableListOf<String>()
++        ZipFile(jarFile).use { zip ->
++            val entries = zip.entries()
++            while (entries.hasMoreElements()) {
++                val name = entries.nextElement().name
++                if (name.startsWith("org/purpurmc/")
++                    || name.startsWith("org/bukkit/")
++                    || name.startsWith("io/papermc/")) {
++                    leaked.add(name)
++                }
 +            }
++        }
++        if (leaked.isNotEmpty()) {
++            throw GradleException("В JAR попал API сервера: ${leaked.take(5)}")
 +        }
 +    }
 +}
