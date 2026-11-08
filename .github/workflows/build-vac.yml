@@ -173,11 +173,15 @@ jobs:
       # pom.xml намеренно не менялся, но его работоспособность надо доказать,
       # а не предполагать: ставим Maven и собираем второй раз против того же
       # локального API (scope provided — API не попадёт в JAR).
+      # continue-on-error маскирует провал (шаг показывается зелёным даже при
+      # exit 1), поэтому результат пишем в отдельный маркер и явно выводим в
+      # отчёт: Maven-сборка НЕ должна выглядеть проверенной, если не собралась.
       - name: Maven build (проверка pom.xml, не блокирует Gradle-результат)
         id: maven
         continue-on-error: true
         working-directory: compat/VoidAntiCheat
         run: |
+          echo "MAVEN_STATUS=НЕ ЗАПУСКАЛАСЬ" > /tmp/maven-status.txt
           set -euo pipefail
           ok=false
           for attempt in 1 2 3; do
@@ -193,6 +197,8 @@ jobs:
           "$MVN" -B -q -version
           "$MVN" -B package -DskipTests
           ls -l target/*.jar
+          MJAR=$(ls target/VoidAntiCheat-*.jar | head -1)
+          echo "MAVEN_STATUS=СОБРАН ($MJAR, $(stat -c '%s' "$MJAR") байт)" > /tmp/maven-status.txt
           echo "MAVEN_OK"
 
       - name: Verify JAR contents and checksum
@@ -244,7 +250,7 @@ jobs:
             echo "| API сборки | \`${{ steps.api.outputs.API_VERSION }}\` (compileOnly) |"
             echo "| Java | \`$(java -version 2>&1 | head -1)\` |"
             echo "| Gradle | \`$(gradle --version | grep '^Gradle' | cut -d' ' -f2)\` |"
-            echo "| Maven | \`$( [ -x /opt/apache-maven-3.9.9/bin/mvn ] && /opt/apache-maven-3.9.9/bin/mvn -v 2>/dev/null | head -1 || echo "не ставился" )\` |"
+            echo "| Maven (pom.xml) | \`$(cut -d= -f2- /tmp/maven-status.txt 2>/dev/null || echo "НЕ ЗАПУСКАЛАСЬ")\` |"
             echo ""
             echo "<details><summary>plugin.yml</summary>"
             echo ""
