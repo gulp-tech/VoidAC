@@ -227,8 +227,20 @@ jobs:
         run: |
           set +e
           OUT=""
-          [ -f /tmp/vac.log ] && OUT=$(grep -vE "warning:|^\s+\^" /tmp/vac.log | tail -60)
-          [ -z "$OUT" ] && [ -f /tmp/core.log ] && OUT=$(tail -80 /tmp/core.log)
+          if [ -f /tmp/vac.log ]; then
+            {
+              echo "=== ОШИБКИ КОМПИЛЯЦИИ ==="
+              grep -E "\.java:[0-9]+: (error|ошибка)" /tmp/vac.log | head -25
+              echo "=== WHAT WENT WRONG ==="
+              sed -n '/What went wrong/,/\* Try:/p' /tmp/vac.log | head -40
+              echo "=== CAUSED BY ==="
+              grep -E "Caused by" /tmp/vac.log | head -10
+              echo "=== BUILD ==="
+              grep -E "BUILD (FAILED|SUCCESSFUL)|actionable task" /tmp/vac.log | head -5
+            } > /tmp/out.txt 2>/dev/null
+            OUT=$(cat /tmp/out.txt)
+          fi
+          [ -z "$OUT" ] && [ -f /tmp/core.log ] && OUT=$(tail -60 /tmp/core.log)
           BODY="### Лог сборки VAC (\`${GITHUB_SHA:0:7}\`)
           \`\`\`
           ${OUT:-нет данных}
