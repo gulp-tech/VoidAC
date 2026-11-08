@@ -1,3 +1,5 @@
+import java.util.zip.ZipFile
+
 // Отдельный Gradle-плагин для ядра Purpurbedrock 26.2.
 //
 // Сборка сделана по образцу purpurbedrock-npc/build.gradle.kts из этого же
@@ -87,11 +89,15 @@ tasks.register("verifyNoApiInJar") {
     dependsOn(tasks.jar)
     doLast {
         val jarFile = tasks.jar.get().archiveFile.get().asFile
-        // Явный обход Enumeration: `zip.entries().asSequence()` в Kotlin DSL
-        // не выводит тип (`Cannot infer type for type parameter 'T'`), поэтому
-        // цикл написан в java-стиле и без хрупкого вывода типов.
+        // Две ловушки Kotlin DSL, обе проверены сборкой в CI:
+        //  1) `zip.entries().asSequence()` не выводит тип
+        //     (`Cannot infer type for type parameter 'T'`) — обходим Enumeration
+        //     явным циклом;
+        //  2) полное имя `java.util.zip.ZipFile` внутри скрипта не резолвится,
+        //     потому что `java` перекрыт расширением `java {}` — нужен import
+        //     в начале файла.
         val leaked = mutableListOf<String>()
-        java.util.zip.ZipFile(jarFile).use { zip ->
+        ZipFile(jarFile).use { zip ->
             val entries = zip.entries()
             while (entries.hasMoreElements()) {
                 val name = entries.nextElement().name
