@@ -240,7 +240,9 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
      * метод принимает adventure {@code Key} — прямой вызов давал NoSuchMethodError
      * и все проверки оставались на консервативных значениях по умолчанию.
      */
-    private static <T> T registryLookup(org.bukkit.Registry<T> registry, String... keys) {
+    // В 26.2 Registry объявлен как `Registry<T extends Keyed>`, поэтому без
+    // границы типа javac падает: "type argument T is not within bounds".
+    private static <T extends org.bukkit.Keyed> T registryLookup(org.bukkit.Registry<T> registry, String... keys) {
         if (registry == null) {
             return null;
         }
@@ -1755,6 +1757,24 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
      * Двусторонняя компенсация: минимальная дистанция по истории хитбокса
      * цели за окно пинга + допуск от скорости цели, джиттера и тач-ввода.
      */
+    /**
+     * Пинг для компенсации задержки при расчёте дальности удара.
+     *
+     * <p>Приоритет у ядра: реальный RakNet/NetherNet RTT Bedrock-сессии. Но
+     * {@code coreBridge.ping()} возвращает {@code -1}, когда живой сессии нет
+     * (плагин перезагружен, игрок ещё не авторизован), поэтому есть откат на
+     * {@code Player#getPing()}. Значение зажимается в разумные пределы: пинг
+     * участвует в лимитах, и аномалия не должна ни ужимать, ни раздувать допуск.
+     * </p>
+     */
+    private int effectivePing(Player player, PlayerData data) {
+        int ping = data == null ? -1 : data.sessionPing;
+        if (ping <= 0 && player != null) {
+            ping = player.getPing();
+        }
+        return Math.max(0, Math.min(ping, 2000));
+    }
+
     private ReachVerdict measureReach(Player attacker, PlayerData data, LivingEntity target, long now) {
         BoundingBox box = target.getBoundingBox();
         Vector eye = attacker.getEyeLocation().toVector();
