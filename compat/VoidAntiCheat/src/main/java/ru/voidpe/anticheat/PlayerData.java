@@ -127,6 +127,48 @@ public final class PlayerData {
     public float rotationBeforeAttack;
     public int cpsHighWindows;
 
+    // ---------------------------------------------------------------- ввод
+    /**
+     * Кэш определителя устройства. Рефлексия в горячем пути недопустима,
+     * поэтому профиль опрашивается не чаще раза в несколько секунд.
+     */
+    public DeviceProbe.Profile device = DeviceProbe.Profile.unknown("ещё не опрашивался");
+    public long deviceProbedAt;
+    /** Поведенческий отпечаток, когда и ядро, и Floodgate молчат. */
+    public final DeviceProbe.Behaviour behaviour = new DeviceProbe.Behaviour();
+    /** Подозрение на подмену платформы уже записано в лог. */
+    public boolean spoofWarned;
+
+    // ------------------------------------------------------- добыча ресурсов
+    /** Последние разрушенные блоки: тип и время. */
+    public final ArrayDeque<BrokenBlock> brokenBlocks = new ArrayDeque<>();
+    /** Сколько руды подряд сломано без единого промаха по камню. */
+    public int oreStreak;
+    /** Сколько разных руд за окно — бот берёт всё подряд. */
+    public int oreVariety;
+    public long oreStreakStart;
+    /** Последний поворот перед разрушением блока (для AutoMine). */
+    public float yawBeforeBreak;
+    public double pitchBeforeBreak;
+
+    // ------------------------------------------------------------- постройка
+    /** Отпечатки установленных блоков за окно: смещение от игрока + тип. */
+    public final ArrayDeque<String> placePattern = new ArrayDeque<>();
+    /** Времена действий для проверки бота (удары, блоки, прыжки). */
+    public final ArrayDeque<Long> botActions = new ArrayDeque<>();
+
+    /** Сколько раз подряд повторился один и тот же отпечаток. */
+    public int patternRepeats;
+    public double lastPlaceOffsetX;
+    public double lastPlaceOffsetZ;
+
+    /**
+     * Сломанный блок: что и когда. Тип нужен, чтобы отличать охоту за рудой
+     * от обычной копки камня — именно на этом ловится AutoMine.
+     */
+    public record BrokenBlock(long timeMillis, org.bukkit.Material type, boolean ore) {
+    }
+
     // Транспорт.
     public String vehicleWorld = "";
     public double vehicleX;
@@ -223,5 +265,11 @@ public final class PlayerData {
             state.reset();
         }
         targets.clear();
+        brokenBlocks.clear();
+        placePattern.clear();
+        botActions.clear();
+        oreStreak = 0;
+        oreVariety = 0;
+        patternRepeats = 0;
     }
 }

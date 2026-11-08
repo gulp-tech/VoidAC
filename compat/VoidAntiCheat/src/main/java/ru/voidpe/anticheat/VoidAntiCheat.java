@@ -131,6 +131,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
     private FloodgateHook floodgate;
     private BedrockCoreBridge coreBridge;
     private AntiEspManager antiEsp;
+    private DeviceProbe deviceProbe;
     private RegionHook regions;
     private BukkitTask secondTask;
     private ExecutorService ioExecutor;
@@ -181,6 +182,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         }
         floodgate = new FloodgateHook(getLogger());
         coreBridge = new BedrockCoreBridge(getLogger());
+        deviceProbe = new DeviceProbe(coreBridge, floodgate);
         antiEsp = new AntiEspManager(this, getLogger());
         antiEsp.configure(
                 confBool("anti-esp.enabled", false),
@@ -191,6 +193,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 confBool("anti-esp.hide-spectators", true),
                 confBool("anti-esp.hide-invisible", true),
                 confBool("anti-esp.only-if-core-inactive", true));
+        applyAdvancedAntiEsp();
         regions = new RegionHook(getLogger());
         ioExecutor = Executors.newSingleThreadExecutor(runnable -> {
             Thread thread = new Thread(runnable, "VoidAntiCheat-IO");
@@ -316,6 +319,10 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
 
     // ------------------------------------------------------------ конфиг-хелперы
 
+    private String confString(String path, String fallback) {
+        return getConfig().getString(path, fallback);
+    }
+
     private boolean confBool(String path, boolean fallback) {
         return getConfig().getBoolean(path, fallback);
     }
@@ -382,6 +389,98 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         updateSafeLocation(player, player.getLocation(), data);
         players.put(player.getUniqueId(), data);
         return data;
+    }
+
+    /** Применяет расширенные настройки Anti-ESP из конфига (уровень, трассировка). */
+    private void applyAdvancedAntiEsp() {
+        if (antiEsp == null) {
+            return;
+        }
+        AntiEspManager.Level level;
+        try {
+            level = AntiEspManager.Level.valueOf(
+                    String.valueOf(confString("anti-esp.level", "BALANCED")).toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException wrongName) {
+            level = AntiEspManager.Level.BALANCED;
+        }
+        antiEsp.configureAdvanced(
+                level,
+                confBool("anti-esp.trace-blocks", true),
+                confInt("anti-esp.trace-max-distance", 48),
+                confDouble("anti-esp.combat-radius", 6.0),
+                confInt("anti-esp.hide-after-samples", 2),
+                confInt("anti-esp.reveal-after-samples", 2),
+                confBool("anti-esp.hide-through-walls-only", false),
+                confBool("anti-esp.keep-vehicles", true),
+                confBool("anti-esp.keep-in-combat", true));
+    }
+
+    /**
+     * Категория ввода игрока с кэшем.
+     *
+     * <p>Опрос ядра — это рефлексия, а событий движения до 20 в секунду.
+     * Поэтому профиль живёт {@link DeviceProbe#CACHE_MILLIS} секунд: ввод
+     * (сенсор/мышь/геймпад) не меняется чаще, а данные сессии тоже приходят
+     * асинхронно.</p>
+     *
+     * <p><b>Главное правило безопасности:</b> если данных нет, категория
+     * {@code UNKNOWN}, и она даёт мягкие лимиты. Отсутствие данных не должно
+     * ухудшать положение игрока.</p>
+     */
+    private DeviceProbe.InputKind inputKindOf(Player player, PlayerData data) {
+        refreshDevice(player, data, false);
+        return data.device.kind();
+    }
+
+    /** Полный профиль — для /vac info и алертов. */
+    private DeviceProbe.Profile deviceProfile(Player player, PlayerData data) {
+        refreshDevice(player, data, true);
+        return data.device;
+    }
+
+    private void refreshDevice(Player player, PlayerData data, boolean force) {
+        if (data == null || player == null || deviceProbe == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (!force && !DeviceProbe.stale(data.deviceProbedAt, now)) {
+            return;
+        }
+        data.deviceProbedAt = now;
+        DeviceProbe.Profile profile = deviceProbe.probe(player);
+        data.device = profile;
+        if (profile.kind() != DeviceProbe.InputKind.UNKNOWN) {
+            // Совместимость: остальной код и /vac info читают эти поля.
+            data.deviceId = deviceIdFromKind(profile.kind());
+            data.inputMode = profile.rawInput();
+        }
+        // Подозрение на подмену платформы — только предупреждение в лог.
+        // Это не VL: устройство может врать по десятку невинных причин
+        // (прокси, сторонний лончер), а наказывать за данные сессии нельзя.
+        if (profile.suspectedSpoof() && !data.spoofWarned) {
+            data.spoofWarned = true;
+            deviceProbe.warnSpoofOnce(player, profile, new HashSet<>(java.util.List.of(player.getUniqueId())));
+        }
+    }
+
+    /** Человекочитаемый вердикт по согласованности данных устройства. */
+    private static String verdictText(DeviceProbe.Verdict verdict) {
+        return switch (verdict) {
+            case CONSISTENT -> "данные согласованы";
+            case PLATFORM_SPOOF_SUSPECT -> "подозрение на подмену платформы";
+            case CONTRADICTORY -> "платформа и ввод противоречат друг другу";
+        };
+    }
+
+    /** Обратное преобразование категории ввода в строку, понятную остальному коду. */
+    private static String deviceIdFromKind(DeviceProbe.InputKind kind) {
+        return switch (kind) {
+            case DESKTOP_KBM -> "windows";
+            case MOBILE_TOUCH -> "android";
+            case MOBILE_KBM -> "phone_kbm";
+            case CONTROLLER -> "xbox";
+            case UNKNOWN -> BedrockCoreBridge.DEVICE_UNKNOWN;
+        };
     }
 
     /**
@@ -1792,11 +1891,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         // Ввод: явный сенсор/мобильная ОС/телефон с КМ — сенсорный лимит.
         // Неизвестное устройство тоже получает сенсорный (мягкий) лимит:
         // отсутствие данных не должно ухудшать положение игрока.
-        boolean touchLike = BedrockCoreBridge.isTouchFamily(data.deviceId)
-                || "TOUCH".equalsIgnoreCase(data.inputMode)
-                || (!BedrockCoreBridge.isDesktopOrConsole(data.deviceId)
-                    && !"KEYBOARD_MOUSE".equalsIgnoreCase(data.inputMode)
-                    && !"CONTROLLER".equalsIgnoreCase(data.inputMode));
+        boolean touchLike = inputKindOf(player, data).softLimits();
         double limit = touchLike
                 ? confDouble("combat.reach-touch-max-blocks", 3.65)
                 : confDouble("combat.reach-max-blocks", 3.45);
@@ -1848,6 +1943,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         }
         long now = System.currentTimeMillis();
         recordAttack(data, target, now);
+        recordBotAction(data, now);
         if (inGrace(data) || data.lag.unstable(now)) {
             return;
         }
@@ -1932,11 +2028,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 lastSecond++;
             }
         }
-        boolean touch = BedrockCoreBridge.isTouchFamily(data.deviceId)
-                || "TOUCH".equalsIgnoreCase(data.inputMode)
-                || (!BedrockCoreBridge.isDesktopOrConsole(data.deviceId)
-                    && !"KEYBOARD_MOUSE".equalsIgnoreCase(data.inputMode)
-                    && !"CONTROLLER".equalsIgnoreCase(data.inputMode));
+        boolean touch = inputKindOf(player, data).softLimits();
         // VoidPvP убирает ванильный кулдаун атаки, поэтому высокий CPS там —
         // штатное поведение, а не автокликер. Оставляем только проверку
         // машинной ровности интервалов (её спам не даёт).
@@ -2023,6 +2115,10 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             data.lastBreakTick = tick;
             data.breaksThisTick = 1;
         }
+        // Добыча ресурсов и признак бота считаются по каждому разрушению:
+        // оба смотрят на то, ЧТО и КОГДА ломается, а не на скорость.
+        autoMineCheck(player, data, event.getBlock(), now);
+        recordBotAction(data, now);
         data.breaks.addLast(now);
         pruneWindow(data.breaks, now, 1000L, 80);
         int sameTickLimit = confInt("world.fastbreak-same-tick", 4);
@@ -2039,6 +2135,233 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             if (enforcementEnabled() && (cancel || data.breaksThisTick > sameTickLimit + 2)) {
                 event.setCancelled(true);
             }
+        }
+    }
+
+    // ------------------------------------------------------- добыча ресурсов
+
+    /**
+     * AutoMine / Ore Scанner: клиент сам находит руду и ведёт кирку.
+     *
+     * <p>Отличие от FastBreak: скорость здесь нормальная. Улика в другом —
+     * игрок ломает подряд только руду, не трогая камень между жилами, и/или
+     * перед каждым разрушением резко доводит прицел на блок.</p>
+     *
+     * <p><b>Почему это не ложно срабатывает на честных.</b> Обычный шахтёр
+     * копает туннель и ломает камень; если он идёт по жиле, он всё равно
+     * задевает вмещающую породу. Учитываются оба признака сразу:
+     * доля руды среди разрушений и разнообразие руды. Плюс требуется
+     * минимальное число блоков за окно — одиночная жила не улика.</p>
+     */
+    private void autoMineCheck(Player player, PlayerData data, Block block, long now) {
+        Material type = block.getType();
+        boolean ore = isOreMaterial(type);
+        data.brokenBlocks.addLast(new PlayerData.BrokenBlock(now, type, ore));
+        long window = confLong("automine.window-ms", 20000L);
+        while (!data.brokenBlocks.isEmpty() && now - data.brokenBlocks.peekFirst().timeMillis() > window) {
+            data.brokenBlocks.removeFirst();
+        }
+        while (data.brokenBlocks.size() > 120) {
+            data.brokenBlocks.removeFirst();
+        }
+
+        int total = data.brokenBlocks.size();
+        int ores = 0;
+        Set<Material> varieties = new HashSet<>();
+        for (PlayerData.BrokenBlock broken : data.brokenBlocks) {
+            if (broken.ore()) {
+                ores++;
+                varieties.add(broken.type());
+            }
+        }
+        if (ores > 0) {
+            if (data.oreStreak == 0) {
+                data.oreStreakStart = now;
+            }
+            data.oreStreak = ore ? data.oreStreak + 1 : 0;
+            data.oreVariety = varieties.size();
+        } else {
+            data.oreStreak = 0;
+        }
+
+        int minBlocks = confInt("automine.min-blocks", 12);
+        if (total < minBlocks) {
+            return;
+        }
+        double ratio = ores / (double) total;
+        double minRatio = confDouble("automine.ore-ratio", 0.85);
+        int minVariety = confInt("automine.min-variety", 3);
+        int streak = confInt("automine.streak", 6);
+
+        // Признак 1: почти всё, что ломается за окно, — руда разных видов.
+        if (ratio >= minRatio && data.oreVariety >= minVariety) {
+            flag(player, data, CheckId.AUTOMINE, 1.0,
+                    String.format(Locale.ROOT, "руда %.0f%% разрушений, видов %d за %d с",
+                            ratio * 100.0, data.oreVariety, window / 1000L));
+            data.brokenBlocks.clear();
+            return;
+        }
+        // Признак 2: длинная серия руды без промаха по породе.
+        if (data.oreStreak >= streak) {
+            flag(player, data, CheckId.AUTOMINE, 1.0,
+                    "серия " + data.oreStreak + " блоков руды подряд без породы");
+            data.oreStreak = 0;
+            data.brokenBlocks.clear();
+        }
+    }
+
+    /** Руда и близкие к ней ценные блоки, за которыми охотятся клиенты. */
+    private static boolean isOreMaterial(Material type) {
+        if (type == null) {
+            return false;
+        }
+        String name = type.name();
+        return name.endsWith("_ORE") || name.startsWith("DEEPSLATE_")
+                && name.endsWith("_ORE")
+                || type == Material.ANCIENT_DEBRIS
+                || type == Material.NETHER_QUARTZ_ORE
+                || type == Material.NETHER_GOLD_ORE;
+    }
+
+    // ------------------------------------------------------------- бот-игрок
+
+    /**
+     * MineBot: программа, играющая за игрока.
+     *
+     * <p>Ловится не по одному событию, а по сумме трёх независимых признаков,
+     * каждый из которых по отдельности бывает и у человека:</p>
+     * <ol>
+     *   <li><b>Ровность.</b> Стандартное отклонение интервалов между
+     *       действиями близко к нулю — человек так не умеет;</li>
+     *   <li><b>Отсутствие простоев.</b> Бот не отвлекается: почти нет пауз
+     *       длиннее секунды за всё окно;</li>
+     *   <li><b>Реакция.</b> Интервал между появлением цели и первым ударом
+     *       подозрительно стабилен и короток.</li>
+     * </ol>
+     *
+     * <p>Порог намеренно высокий: окно 30 секунд и минимум 30 событий.
+     * Ложное обвинение живого человека здесь дороже пропущенного бота.</p>
+     */
+    private void mineBotCheck(Player player, PlayerData data, long now) {
+        ArrayDeque<Long> actions = data.botActions;
+        if (actions.size() < confInt("bot.min-actions", 30)) {
+            return;
+        }
+        long window = confLong("bot.window-ms", 30000L);
+        while (!actions.isEmpty() && now - actions.peekFirst() > window) {
+            actions.removeFirst();
+        }
+        if (actions.size() < confInt("bot.min-actions", 30)) {
+            return;
+        }
+
+        // Интервалы между действиями.
+        double[] gaps = new double[actions.size() - 1];
+        long previous = 0L;
+        int index = 0;
+        long longPauses = 0L;
+        for (long time : actions) {
+            if (previous != 0L) {
+                long gap = time - previous;
+                if (gap > 0 && gap < 10000L) {
+                    gaps[index++] = gap;
+                    if (gap > 1000L) {
+                        longPauses++;
+                    }
+                }
+            }
+            previous = time;
+        }
+        if (index < 10) {
+            return;
+        }
+        double mean = 0;
+        for (int i = 0; i < index; i++) {
+            mean += gaps[i];
+        }
+        mean /= index;
+        double variance = 0;
+        for (int i = 0; i < index; i++) {
+            double diff = gaps[i] - mean;
+            variance += diff * diff;
+        }
+        double deviation = Math.sqrt(variance / index);
+        double relative = mean <= 0 ? 1.0 : deviation / mean;
+
+        double maxRelative = confDouble("bot.max-relative-deviation", 0.06);
+        double maxPauseShare = confDouble("bot.max-pause-share", 0.02);
+        double pauseShare = longPauses / (double) index;
+
+        // Оба условия сразу: ровность и отсутствие простоев.
+        if (relative <= maxRelative && pauseShare <= maxPauseShare) {
+            flag(player, data, CheckId.MINEBOT, 1.0,
+                    String.format(Locale.ROOT,
+                            "ровность действий %.1f%% (порог %.1f%%), пауз %.1f%% из %d",
+                            relative * 100.0, maxRelative * 100.0, pauseShare * 100.0, index));
+            actions.clear();
+        }
+    }
+
+    /** Отметка действия для проверки бота (удар, блок, прыжок). */
+    private void recordBotAction(PlayerData data, long now) {
+        if (!confBool("bot.enabled", true)) {
+            return;
+        }
+        data.botActions.addLast(now);
+        while (data.botActions.size() > 256) {
+            data.botActions.removeFirst();
+        }
+    }
+
+    // ------------------------------------------------------ автоматическая постройка
+
+    /**
+     * BuildPattern: автоматическая постройка по схеме.
+     *
+     * <p>Отличие от Scaffold: там блок кладётся под ноги на бегу, здесь —
+     * повторяющийся узор. Улика в том, что смещение и тип блока повторяются
+     * с точностью, недостижимой для человека, который ведёт мышью.</p>
+     *
+     * <p>Учитываются три вещи: одинаковое смещение от игрока, одинаковый тип
+     * блока и одинаковый порядок. Требуется серия повторов, а не два блока.</p>
+     */
+    private void buildPatternCheck(Player player, PlayerData data, Location placed, long now) {
+        Location eye = player.getLocation();
+        if (placed == null || eye.getWorld() == null || placed.getWorld() == null
+                || !placed.getWorld().equals(eye.getWorld())) {
+            return;
+        }
+        double dx = placed.getX() - eye.getX();
+        double dz = placed.getZ() - eye.getZ();
+        // Точность до 0.5 блока: человек повторяет смещение примерно,
+        // а схема — точно. Более мелкая сетка давала бы ложные совпадения.
+        long qx = Math.round(dx * 2.0);
+        long qz = Math.round(dz * 2.0);
+        double tolerance = confDouble("buildpattern.offset-tolerance", 0.5);
+        boolean sameOffset = Math.abs(dx - data.lastPlaceOffsetX) <= tolerance
+                && Math.abs(dz - data.lastPlaceOffsetZ) <= tolerance;
+
+        String fingerprint = placed.getBlock().getType().name() + "@" + qx + "," + qz;
+        data.placePattern.addLast(fingerprint);
+        long window = confLong("buildpattern.window-ms", 15000L);
+        while (data.placePattern.size() > confInt("buildpattern.max-blocks", 48)) {
+            data.placePattern.removeFirst();
+        }
+        if (sameOffset) {
+            data.patternRepeats++;
+        } else {
+            data.patternRepeats = 1;
+        }
+        data.lastPlaceOffsetX = dx;
+        data.lastPlaceOffsetZ = dz;
+
+        int required = confInt("buildpattern.repeats", 8);
+        if (data.patternRepeats >= required) {
+            flag(player, data, CheckId.BUILDPATTERN, 1.0,
+                    "одинаковое смещение " + formatVl(dx) + "/" + formatVl(dz)
+                            + " бл. повторено " + data.patternRepeats + " раз");
+            data.patternRepeats = 0;
+            data.placePattern.clear();
         }
     }
 
@@ -2118,6 +2441,8 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 return;
             }
         }
+        buildPatternCheck(player, data, event.getBlockPlaced().getLocation(), now);
+        recordBotAction(data, now);
         scaffoldCheck(player, data, event, now);
     }
 
@@ -2218,6 +2543,9 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             }
 
             timerCheck(player, data, tick, now);
+            // Бот проверяется раз в секунду по накопленной очереди действий:
+            // на каждое событие это было бы слишком дорого, а окно у него 30 с.
+            mineBotCheck(player, data, now);
         }
         // Удаляем данные ушедших, даже если QuitEvent где-то потерялся.
         players.keySet().removeIf(uuid -> Bukkit.getPlayer(uuid) == null);
@@ -2565,6 +2893,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                             confBool("anti-esp.hide-spectators", true),
                             confBool("anti-esp.hide-invisible", true),
                             confBool("anti-esp.only-if-core-inactive", true));
+                    applyAdvancedAntiEsp();
                 }
                 // Буферы/VL не сбрасываем: reload не должен прощать нарушения.
                 tell(sender, "reloaded");
@@ -2604,12 +2933,28 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                     return true;
                 }
                 PlayerData data = data(target);
+                // Профиль устройства обновляем принудительно: /vac info — это
+                // диагностика, и админ должен видеть свежие данные, а не кэш.
+                DeviceProbe.Profile device = deviceProfile(target, data);
                 tell(sender, "info-header",
                         "{player}", target.getName(),
                         "{bedrock}", String.valueOf(data.bedrock),
                         "{input}", data.inputMode,
                         "{device}", data.deviceOs,
                         "{ping}", String.valueOf(target.getPing()));
+                // Точная расшифровка ввода: ПК / телефон с экрана / телефон
+                // с мышью / геймпад. Отдельной строкой, чтобы не ломать
+                // существующий шаблон info-header в конфигах.
+                String source = device.liveSession() ? "сессия ядра"
+                        : device.kind() == DeviceProbe.InputKind.UNKNOWN ? "данных нет" : "Floodgate";
+                tell(sender, "info-input",
+                        "{kind}", device.kind().label(),
+                        "{platform}", device.platform(),
+                        "{raw_input}", device.rawInput(),
+                        "{model}", device.model().isEmpty() ? "—" : device.model(),
+                        "{ui}", device.uiProfile(),
+                        "{source}", source,
+                        "{verdict}", verdictText(device.verdict()));
                 tell(sender, "info-lag",
                         "{interval}", formatVl(data.lag.intervalMs()),
                         "{jitter}", formatVl(data.lag.deviationMs()),

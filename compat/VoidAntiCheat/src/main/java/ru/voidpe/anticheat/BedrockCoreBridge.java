@@ -142,6 +142,22 @@ final class BedrockCoreBridge {
     }
 
     /**
+     * Публичный доступ к произвольному ключу ядра — для точного определителя
+     * ввода ({@link DeviceProbe}). Возвращает {@code null}, если сессии нет или
+     * ядро такого ключа не знает.
+     *
+     * <p>Список ключей ядра: {@code platform}, {@code input}, {@code device_id},
+     * {@code device_model}, {@code ui}, {@code protocol}, {@code xuid},
+     * {@code version}, {@code ping}.</p>
+     */
+    String queryPublic(Player player, String key) {
+        if (player == null || key == null || !available()) {
+            return null;
+        }
+        return query(player, key);
+    }
+
+    /**
      * Пинг из Geyser-сессии, мс. {@code -1} — данных нет.
      * {@code Bukkit#getPing()} у Bedrock через Geyser часто 0, поэтому это
      * единственный честный источник; при {@code -1} вызывающий код должен

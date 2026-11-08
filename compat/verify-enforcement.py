@@ -154,6 +154,44 @@ def main() -> int:
         if 'case "setback"' not in cmd_ctx:
             fail(f"строка {i + 1}: setbackPlayer() вызывается не из команды /vac setback")
 
+    # --- 4b. у каждой проверки есть секция в конфиге ------------------------
+    # Новая проверка без секции молча работает на значениях по умолчанию — это
+    # уже случалось, поэтому проверяем явно.
+    import re as _re
+
+    check_ids = _re.findall(r'^\s+([A-Z_]+)\("([a-z]+)",\s*"', SRC.read_text(encoding="utf-8"), _re.M)
+    config = (ROOT / "VoidAntiCheat/src/main/resources/config.yml").read_text(encoding="utf-8")
+    checks_block = config.split("\nchecks:", 1)[1].split("\nmessages:", 1)[0] if "\nchecks:" in config else ""
+    for const, key in check_ids:
+        checks += 1
+        if f"\n  {key}:" not in checks_block:
+            fail(f"проверка {const} ({key}) не имеет секции checks.{key} в config.yml")
+
+    # --- 4c. каждый прочитанный ключ конфига существует ---------------------
+    used = set(_re.findall(r'conf(?:Bool|Int|Long|Double|String)\("([^"]+)"', SRC.read_text(encoding="utf-8")))
+
+    def flatten(node, prefix=""):
+        flat = {}
+        for key, value in node.items():
+            full = f"{prefix}{key}"
+            if isinstance(value, dict):
+                flat.update(flatten(value, full + "."))
+            else:
+                flat[full] = value
+        return flat
+
+    try:
+        import yaml
+
+        flat_config = flatten(yaml.safe_load(config))
+        for key in sorted(used):
+            checks += 1
+            if key not in flat_config:
+                fail(f"код читает {key}, но такого ключа нет в config.yml — "
+                     f"настройка не работает из конфига")
+    except ImportError:
+        print("  (PyYAML нет — проверка ключей конфига пропущена)", file=sys.stderr)
+
     # --- 5. периодическая задача ничего не делает сама ----------------------
     sec_start, sec_end = body_of(lines, "private void secondTick(")
     sec_body = "\n".join(lines[sec_start: sec_end + 1])

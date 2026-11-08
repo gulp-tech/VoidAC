@@ -22,7 +22,20 @@ public enum CheckId {
     SCAFFOLD("scaffold", "Scaffold"),
     BLOCKREACH("blockreach", "BlockReach"),
     BADPACKETS("badpackets", "BadPackets"),
-    NOCLIP("noclip", "NoClip");
+    NOCLIP("noclip", "NoClip"),
+    /**
+     * Автоматическая добыча ресурсов: клиент сам наводится на руду и держит
+     * кирку. Отличается от FastBreak тем, что скорость нормальная — улика в
+     * том, ЧТО ломается и как выбирается цель, а не как быстро.
+     */
+    AUTOMINE("automine", "AutoMine"),
+    /**
+     * Бот, играющий за игрока: ровные интервалы действий, отсутствие простоев,
+     * повтор одного маршрута, действия без задержки человеческой реакции.
+     */
+    MINEBOT("minebot", "MineBot"),
+    /** Автоматическая постройка схем: повторяемый узор и порядок блоков. */
+    BUILDPATTERN("buildpattern", "BuildPattern");
 
     private final String key;
     private final String display;

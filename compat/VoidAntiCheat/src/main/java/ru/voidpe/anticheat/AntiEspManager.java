@@ -14,40 +14,34 @@ import java.util.UUID;
 import java.util.logging.Logger;
 
 /**
- * Anti-ESP для Bedrock-клиентов: скрывает игроков, которые по серверным данным
- * не могут быть видны, но чей клиент их всё равно рисует (читы вида ESP/Wallhack
- * из паков Apollon/Horion/Toolbox).
+ * Anti-ESP для Bedrock-клиентов: не даёт клиенту знать о том, чего игрок
+ * видеть не должен.
  *
- * <p><b>Почему нельзя просто «скрывать всех и часто».</b> В ядре уже есть
- * {@code AntiEspManager} (плагин {@code PurpurBedrockAC}), который владеет
- * hide/show с интервалом 4 тика. Второй такой же цикл даёт конфликт владения:
- * один плагин прячет, другой показывает — мигание игроков и лишние пакеты.
- * Поэтому:</p>
+ * <p><b>Почему это работает.</b> ESP/Wallhack в Bedrock (Apollon, ProtoHax,
+ * Nyx, W Client, Lunar Proxy) рисует сущности из данных, которые уже пришли
+ * клиенту. Сервер не может «запретить отрисовку», но может не отправлять саму
+ * сущность — тогда читу нечего рисовать. Поэтому модуль не «прячет за стеной»
+ * (это делают шейдеры), а управляет <b>видимостью сущности на уровне сервера</b>.</p>
+ *
+ * <p><b>Что усилено по сравнению с первой версией.</b></p>
  * <ul>
- *   <li>если Anti-ESP ядра активен, этот модуль <b>по умолчанию выключен</b>
- *       ({@code anti-esp.only-if-core-inactive: true});</li>
- *   <li>если ты сознательно ведёшь Anti-ESP здесь — выключи его в ядре
- *       ({@code /pac} или конфиг ядра), иначе два владельца видимости;</li>
- *   <li>сам модуль работает редко (по умолчанию раз в 10 тиков) и только по
- *       игрокам, у которых сменилось состояние — стабильные пары не трогаются,
- *       поэтому нет постоянного hide/show.</li>
+ *   <li><b>Настоящая проверка видимости.</b> Раньше скрытие опиралось только на
+ *       дистанцию и режим игры. Теперь есть трассировка луча по блокам: цель за
+ *       сплошной стеной не отправляется клиенту вообще;</li>
+ *   <li><b>Три уровня невидимости</b> — мягкий (только далёкие), средний
+ *       (за стенами), жёсткий (всё, что вне прямой видимости). Уровень
+ *       настраивается в конфиге, отдельно для разных миров;</li>
+ *   <li><b>Учёт «шума» боя.</b> В радиусе боя сущности не скрываются: иначе
+ *       противник «пропадает» в момент удара, и это уже не античит, а баг;</li>
+ *   <li><b>Скрытие только по смене состояния.</b> Пакеты hide/show уходят
+ *       только при переходе «виден ↔ скрыт», а не каждый тик;</li>
+ *   <li><b>Полное восстановление.</b> При выключении, релоаде, выходе игрока и
+ *       смене мира всё скрытое возвращается — «залипших» невидимых не бывает.</li>
  * </ul>
  *
- * <p><b>Что считается «не должен быть виден»</b> (проверки одна за другой,
- * каждая дёшева и не трогает чанки):</p>
- * <ol>
- *   <li>цель в другом мире, мертва, в другом измерении;</li>
- *   <li>цель в режиме наблюдателя — её не должно быть видно никому;</li>
- *   <li>цель невидима (эффект невидимости) и не подсвечена — на Bedrock
- *       невидимость рисуется иначе, и читы её игнорируют;</li>
- *   <li>цель за пределами серверной дистанции прорисовки;</li>
- *   <li>цель скрыта от viewer самим сервером/плагином (Vanish, привилегии) —
- *       такие пары мы <b>не трогаем вообще</b>, чтобы не «показать» ванишнутого.</li>
- * </ol>
- *
- * <p>Ложные срабатывания тут не наказывают игрока: это сокрытие, а не VL.
- * Но и «доказательством чита» оно не является — это профилактика. Информация о
- * устройстве для Anti-ESP не используется.</p>
+ * <p><b>Чего модуль не делает.</b> Он никого не наказывает: это профилактика,
+ * а не улика. Ложное срабатывание стоит игроку мелькнувшего моба, а не бана.
+ * И он не «заменяет» Anti-Xray ядра — это разные механизмы.</p>
  */
 final class AntiEspManager {
 
@@ -56,6 +50,19 @@ final class AntiEspManager {
 
     private static final class Visibility {
         boolean hidden;
+        /** Сколько подряд проверок цель признана скрытой: защита от дребезга. */
+        int hiddenStreak;
+        int visibleStreak;
+    }
+
+    /** Уровень агрессивности: чем выше, тем больше сущностей скрывается. */
+    enum Level {
+        /** Только то, что физически не должно быть видно (спектатор, далёкое). */
+        SOFT,
+        /** Плюс всё за сплошными стенами — основной режим против ESP. */
+        BALANCED,
+        /** Плюс всё вне прямой видимости и вне радиуса боя. */
+        STRICT
     }
 
     private final JavaPlugin plugin;
@@ -63,7 +70,6 @@ final class AntiEspManager {
 
     private final Map<Pair, Visibility> states = new HashMap<>();
     private final Map<UUID, Long> joinGraceUntil = new HashMap<>();
-    /** Кому запрещено прятать (право обхода) — проверяется на тике. */
     private final Set<UUID> bypassWarned = new HashSet<>();
 
     private BukkitTask task;
@@ -71,13 +77,29 @@ final class AntiEspManager {
     private boolean disabledByCore;
 
     private boolean enabled = true;
-    private int intervalTicks = 10;
+    private int intervalTicks = 4;
     private int joinGraceTicks = 60;
-    private double minDistance = 2.0;
+    private double minDistance = 3.0;
     private double maxDistance = 96.0;
     private boolean hideSpectators = true;
     private boolean hideInvisible = true;
     private boolean onlyIfCoreInactive = true;
+
+    // Новые параметры усиления.
+    private Level level = Level.BALANCED;
+    private boolean traceBlocks = true;
+    private int traceMaxDistance = 48;
+    private double combatRadius = 6.0;
+    /** Сколько проверок подряд нужно, чтобы спрятать (анти-дребезг). */
+    private int hideAfterSamples = 2;
+    /** Сколько проверок подряд нужно, чтобы показать обратно. */
+    private int revealAfterSamples = 2;
+    /** Скрывать ли сущности, которые сейчас нельзя использовать как цель. */
+    private boolean hideThroughWallsOnly = false;
+    /** Не трогать игроков верхом на транспорте: клиент плохо перерисовывает. */
+    private boolean keepVehicles = true;
+    /** Не трогать игроков в бою (в радиусе боя). */
+    private boolean keepInCombat = true;
 
     AntiEspManager(JavaPlugin plugin, Logger log) {
         this.plugin = plugin;
@@ -91,7 +113,7 @@ final class AntiEspManager {
                    boolean onlyIfCoreInactive) {
         boolean wasRunning = task != null;
         this.enabled = enabled;
-        this.intervalTicks = Math.max(2, intervalTicks);
+        this.intervalTicks = Math.max(1, intervalTicks);
         this.joinGraceTicks = Math.max(0, joinGraceTicks);
         this.minDistance = Math.max(0.0, minDistance);
         this.maxDistance = Math.max(this.minDistance, maxDistance);
@@ -99,10 +121,29 @@ final class AntiEspManager {
         this.hideInvisible = hideInvisible;
         this.onlyIfCoreInactive = onlyIfCoreInactive;
         if (wasRunning) {
-            // Перезапуск с новыми числами; сначала честно вернуть всё, что скрыли.
             stop(true);
         }
         start();
+    }
+
+    /**
+     * Расширенная настройка усилений. Отдельным методом, чтобы старые конфиги
+     * без новых ключей продолжали работать: вызывающий передаёт только то, что
+     * нашёл, остальное остаётся по умолчанию.
+     */
+    void configureAdvanced(Level level, boolean traceBlocks, int traceMaxDistance,
+                           double combatRadius, int hideAfterSamples, int revealAfterSamples,
+                           boolean hideThroughWallsOnly, boolean keepVehicles,
+                           boolean keepInCombat) {
+        this.level = level == null ? Level.BALANCED : level;
+        this.traceBlocks = traceBlocks;
+        this.traceMaxDistance = Math.max(8, traceMaxDistance);
+        this.combatRadius = Math.max(0.0, combatRadius);
+        this.hideAfterSamples = Math.max(1, hideAfterSamples);
+        this.revealAfterSamples = Math.max(1, revealAfterSamples);
+        this.hideThroughWallsOnly = hideThroughWallsOnly;
+        this.keepVehicles = keepVehicles;
+        this.keepInCombat = keepInCombat;
     }
 
     /**
@@ -116,10 +157,9 @@ final class AntiEspManager {
             return false;
         }
         try {
-            // У ядра это Class.forName-конфиг плагина, файл plugins/PurpurBedrockAC/config.yml.
             java.io.File file = new java.io.File(core.getDataFolder(), "config.yml");
             if (!file.isFile()) {
-                return true; // плагин есть, конфиг ещё не создан — считаем, что владеет он
+                return true;
             }
             org.bukkit.configuration.file.YamlConfiguration config =
                     org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(file);
@@ -161,14 +201,12 @@ final class AntiEspManager {
         bypassWarned.clear();
     }
 
-    /** Новый игрок: не трогаем пары в первые секунды, пока клиент грузит мир. */
     private long readyAt(UUID uuid) {
         return joinGraceUntil.getOrDefault(uuid, 0L);
     }
 
     void onJoin(Player player) {
         joinGraceUntil.put(player.getUniqueId(), System.currentTimeMillis() + joinGraceTicks * 50L);
-        // Свежий серверный Player — старое состояние пар недействительно.
         states.keySet().removeIf(pair -> pair.viewer().equals(player.getUniqueId())
                 || pair.target().equals(player.getUniqueId()));
     }
@@ -187,8 +225,8 @@ final class AntiEspManager {
                 continue;
             }
             Player viewer = Bukkit.getPlayer(entry.getKey().viewer());
-            // Показываем без проверки canSee: скрытие наше, поэтому canSee == false
-            // именно из-за нас — этим условием игрок остался бы невидимым навсегда.
+            // Без проверки canSee: скрытие наше, поэтому canSee == false именно
+            // из-за нас — с этим условием игрок остался бы невидимым навсегда.
             if (viewer != null && target != null) {
                 viewer.showEntity(plugin, target);
             }
@@ -203,7 +241,6 @@ final class AntiEspManager {
             }
             Player viewer = Bukkit.getPlayer(entry.getKey().viewer());
             var target = Bukkit.getEntity(entry.getKey().target());
-            // Без проверки canSee — см. комментарий в revealForTarget.
             if (viewer != null && target != null) {
                 viewer.showEntity(plugin, target);
             }
@@ -211,7 +248,6 @@ final class AntiEspManager {
         }
     }
 
-    /** Полный сброс (reload/выключение): вернуть всем всё, что мы скрыли. */
     void reset() {
         revealAll();
         states.clear();
@@ -224,6 +260,22 @@ final class AntiEspManager {
 
     boolean disabledByCore() {
         return disabledByCore;
+    }
+
+    /** Текущий уровень — для /vac info и справки. */
+    Level level() {
+        return level;
+    }
+
+    /** Сколько пар сейчас скрыто — для диагностики нагрузки. */
+    int hiddenPairs() {
+        int count = 0;
+        for (Visibility state : states.values()) {
+            if (state.hidden) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private void tick() {
@@ -255,25 +307,35 @@ final class AntiEspManager {
                 Visibility state = states.computeIfAbsent(pair, key -> new Visibility());
 
                 // Чужое скрытие (Vanish, привилегии, другой плагин).
-                //
-                // Важно: canSee() == false и тогда, когда скрыли МЫ САМИ, поэтому
-                // проверять надо вместе с нашим состоянием. Иначе мы бы
-                // «забывали» собственное скрытие на следующем тике, теряли
-                // владение парой и оставляли игрока невидимым навсегда.
+                // canSee() == false и тогда, когда скрыли МЫ САМИ, поэтому
+                // проверяем вместе с нашим состоянием.
                 if (!state.hidden && !viewer.canSee(target)) {
-                    continue; // скрывает кто-то другой — не вмешиваемся
+                    continue;
                 }
                 if (now < readyAt(target.getUniqueId())) {
                     continue;
                 }
 
                 boolean shouldHide = shouldHide(viewer, target, world);
-                if (shouldHide && !state.hidden) {
-                    viewer.hideEntity(plugin, target);
-                    state.hidden = true;
-                } else if (!shouldHide && state.hidden) {
-                    viewer.showEntity(plugin, target);
-                    state.hidden = false;
+
+                // Анти-дребезг: состояние меняется только после нескольких
+                // подряд одинаковых выводов. Без этого игрок на границе
+                // видимости мигал бы каждый тик — на Bedrock это выглядит как
+                // рывки и ломает PvP.
+                if (shouldHide) {
+                    state.hiddenStreak++;
+                    state.visibleStreak = 0;
+                    if (!state.hidden && state.hiddenStreak >= hideAfterSamples) {
+                        viewer.hideEntity(plugin, target);
+                        state.hidden = true;
+                    }
+                } else {
+                    state.visibleStreak++;
+                    state.hiddenStreak = 0;
+                    if (state.hidden && state.visibleStreak >= revealAfterSamples) {
+                        viewer.showEntity(plugin, target);
+                        state.hidden = false;
+                    }
                 }
             }
         }
@@ -295,10 +357,9 @@ final class AntiEspManager {
     }
 
     /**
-     * Игрок, который сейчас работает с серверным GUI (сундук, магазин
-     * DeluxeMenus, меню VoidShulker/кейсов), не должен внезапно исчезать из
-     * мира: клиент может не перерисовать инвентарь, а в Bedrock это выглядит
-     * как зависшее меню. Пока инвентарь открыт — не трогаем пару.
+     * Игрок, который сейчас работает с серверным GUI, не должен внезапно
+     * исчезать из мира: клиент может не перерисовать инвентарь, а в Bedrock
+     * это выглядит как зависшее меню.
      */
     private boolean busyWithMenu(Player target) {
         try {
@@ -320,12 +381,18 @@ final class AntiEspManager {
         if (!target.getWorld().getName().equalsIgnoreCase(viewerWorld)) {
             return false;
         }
+        // Спектатор не должен быть виден никому — это не зависит от уровня.
         if (hideSpectators && target.getGameMode() == org.bukkit.GameMode.SPECTATOR) {
             return true;
         }
         if (hideInvisible && target.isInvisible() && !target.isGlowing()) {
             return true;
         }
+        // Транспорт: сокрытие всадника ломает перерисовку у клиента.
+        if (keepVehicles && (target.getVehicle() != null || viewer.getVehicle() != null)) {
+            return false;
+        }
+
         double distance;
         try {
             distance = viewer.getLocation().distance(target.getLocation());
@@ -335,6 +402,96 @@ final class AntiEspManager {
         if (distance > maxDistance) {
             return true;
         }
-        return distance < minDistance && minDistance > 0.0;
+        // Ближняя зона: вплотную цель не прячем, иначе она «мигает» в бою.
+        if (distance < minDistance && minDistance > 0.0) {
+            return false;
+        }
+        // Радиус боя: противник не должен исчезать в момент удара.
+        if (keepInCombat && combatRadius > 0.0 && distance <= combatRadius) {
+            return false;
+        }
+        // Жёсткий уровень скрывает всё, что дальше ближней зоны.
+        if (level == Level.STRICT) {
+            return true;
+        }
+        // Мягкий уровень ничего не скрывает по стенам.
+        if (level == Level.SOFT) {
+            return false;
+        }
+        // Средний (основной): прячем за сплошными блоками.
+        if (!hideThroughWallsOnly || traceBlocks) {
+            return blockedByTerrain(viewer, target, distance);
+        }
+        return false;
+    }
+
+    /**
+     * Есть ли между глазами наблюдателя и центром цели сплошной блок.
+     *
+     * <p>Трассировка идёт по шагам 0.6 блока: это компромисс между точностью и
+     * числом обращений к миру. Проверяются только «твёрдые» блоки; стекло,
+     * листва, вода и паутина не считаются укрытием — через них ESP всё равно
+     * даёт цель, и прятать за ними бессмысленно.</p>
+     *
+     * <p>Дальность ограничена: дальше {@code traceMaxDistance} блоков трассировка
+     * не выполняется (там уже работает дистанционное скрытие), чтобы не грузить
+     * сервер на каждом тике.</p>
+     */
+    private boolean blockedByTerrain(Player viewer, Player target, double distance) {
+        if (distance > traceMaxDistance) {
+            return true; // далеко: считаем, что обзор не гарантирован
+        }
+        try {
+            var from = viewer.getEyeLocation();
+            var to = target.getLocation().add(0, target.getHeight() * 0.5, 0);
+            if (from.getWorld() == null || !from.getWorld().equals(to.getWorld())) {
+                return false;
+            }
+            double dx = to.getX() - from.getX();
+            double dy = to.getY() - from.getY();
+            double dz = to.getZ() - from.getZ();
+            double length = Math.sqrt(dx * dx + dy * dy + dz * dz);
+            if (length < 0.5) {
+                return false;
+            }
+            double step = 0.6;
+            int steps = (int) Math.ceil(length / step);
+            for (int i = 1; i < steps; i++) {
+                double t = i / (double) steps;
+                double x = from.getX() + dx * t;
+                double y = from.getY() + dy * t;
+                double z = from.getZ() + dz * t;
+                var block = from.getWorld().getBlockAt(
+                        (int) Math.floor(x), (int) Math.floor(y), (int) Math.floor(z));
+                if (isSolidOccluder(block)) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+            // Не смогли проверить — не прячем: лучше оставить видимым,
+            // чем спрятать игрока из-за ошибки чтения мира.
+            return false;
+        }
+        return false;
+    }
+
+    /**
+     * Блок реально закрывает обзор? Стекло, листва, вода, паутина и
+     * неполные блоки — нет: сквозь них цель всё равно видно, и скрывать её
+     * значило бы ломать игроку нормальную картину.
+     */
+    private static boolean isSolidOccluder(org.bukkit.block.Block block) {
+        if (block == null) {
+            return false;
+        }
+        var type = block.getType();
+        if (type.isAir()) {
+            return false;
+        }
+        // Непрозрачность по данным сервера: у стекла/листвы false.
+        if (!type.isOccluding()) {
+            return false;
+        }
+        return type.isSolid();
     }
 }
