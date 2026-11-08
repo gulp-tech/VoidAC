@@ -520,6 +520,19 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         return false;
     }
 
+    /**
+     * Единственная точка правды для «можно ли что-то отменять/возвращать».
+     *
+     * <p>Раньше часть коррекций проверяла {@code settings.enforcement} сама, а
+     * часть — нет: откат при «скачке позиции», аварийная отмена FastBreak и
+     * FastPlace при превышении лимита на 2 срабатывали даже в режиме
+     * наблюдения. Для режима «только алерты» это недопустимо — проверка
+     * должна молчать, а не телепортировать игрока назад.</p>
+     */
+    private boolean enforcementEnabled() {
+        return enforcementEnabled();
+    }
+
     private boolean inGrace(PlayerData data) {
         return System.currentTimeMillis() < data.graceUntilMillis;
     }
@@ -711,7 +724,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
 
         maybeAlert(player, data, check, cfg, state, details, now);
 
-        boolean enforcement = confBool("settings.enforcement", true);
+        boolean enforcement = enforcementEnabled();
         long aboveSetback = cfg.setbackVl() > 0
                 ? state.aboveForMillis(VL_SUSTAIN_SETBACK, cfg.setbackVl(), now) : 0L;
         long aboveCancel = cfg.cancelVl() > 0
@@ -1064,7 +1077,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 || to.getPitch() < -90.5f || to.getPitch() > 90.5f
                 || to.getYaw() < -100_000f || to.getYaw() > 100_000f) {
             flag(player, data, CheckId.BADPACKETS, 2.0, "невозможные координаты/углы");
-            if (confBool("settings.enforcement", true)) {
+            if (enforcementEnabled()) {
                 event.setTo(event.getFrom().clone());
             }
             data.resetMovement(event.getFrom(), tick, nowNanos, player.isOnGround());
@@ -1127,8 +1140,13 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         if ((horizontal > teleportDelta || Math.abs(dy) > teleportDelta) && !inGrace(data)) {
             flag(player, data, CheckId.BADPACKETS, 2.0,
                     "скачок позиции " + formatVl(Math.max(horizontal, Math.abs(dy))) + " бл.");
-            event.setTo(safeOr(data, event.getFrom()));
-            data.resetMovement(event.getTo(), tick, nowNanos, player.isOnGround());
+            if (enforcementEnabled()) {
+                event.setTo(safeOr(data, event.getFrom()));
+            }
+            // Состояние фиксируем в любом случае: иначе следующий шаг посчитается
+            // от старой точки и даст ложную улику (и это не «смягчение», это
+            // корректная синхронизация).
+            data.resetMovement(event.getTo() == null ? to : event.getTo(), tick, nowNanos, player.isOnGround());
             return;
         }
 
@@ -1176,7 +1194,10 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             noclipCheck(player, data, to, env, nowMillis);
         }
 
-        if (data.setbackRequested) {
+        // setbackRequested выставляется только внутри flag() после проверки
+        // enforcement, но проверяем ещё раз явно: это единственное место, где
+        // игрока физически возвращают назад.
+        if (data.setbackRequested && enforcementEnabled()) {
             Location safe = safeOr(data, to);
             event.setTo(safe);
             data.resetMovement(safe, tick, nowNanos, true);
@@ -1718,7 +1739,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         ReachVerdict verdict = measureReach(attacker, data, target, now);
         if (verdict.hard()) {
             flag(attacker, data, CheckId.REACH, 2.0, verdict.details());
-            if (confBool("settings.enforcement", true)) {
+            if (enforcementEnabled()) {
                 event.setCancelled(true);
             }
         } else if (verdict.distance() > verdict.limit()) {
@@ -1961,7 +1982,9 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         }
         long now = System.currentTimeMillis();
         data.lastBlockChangeMillis = now;
-        if (blockReachViolation(player, data, event.getBlock())) {
+        // blockReachViolation() всегда фиксирует улику (это нужно и в режиме
+        // наблюдения), а возвращает true только когда блок надо отменить.
+        if (blockReachViolation(player, data, event.getBlock()) && enforcementEnabled()) {
             event.setCancelled(true);
             return;
         }
@@ -1991,7 +2014,9 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                     data.breaksThisTick >= sameTickLimit
                             ? data.breaksThisTick + " блоков за тик"
                             : data.breaks.size() + " блоков/сек");
-            if (cancel || data.breaksThisTick > sameTickLimit + 2) {
+            // Аварийная отмена (> лимит + 2) раньше срабатывала всегда и
+            // игнорировала enforcement — в режиме наблюдения это ломало бур.
+            if (enforcementEnabled() && (cancel || data.breaksThisTick > sameTickLimit + 2)) {
                 event.setCancelled(true);
             }
         }
@@ -2046,7 +2071,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         }
         long now = System.currentTimeMillis();
         data.lastBlockChangeMillis = now;
-        if (blockReachViolation(player, data, event.getBlockPlaced())) {
+        if (blockReachViolation(player, data, event.getBlockPlaced()) && enforcementEnabled()) {
             event.setCancelled(true);
             return;
         }
@@ -2068,7 +2093,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                     data.placesThisTick >= sameTickLimit
                             ? data.placesThisTick + " блоков за тик"
                             : data.places.size() + " блоков/сек");
-            if (cancel || data.placesThisTick > sameTickLimit + 2) {
+            if (enforcementEnabled() && (cancel || data.placesThisTick > sameTickLimit + 2)) {
                 event.setCancelled(true);
                 return;
             }
@@ -2093,7 +2118,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         if (distance > hard) {
             flag(player, data, CheckId.BLOCKREACH, 2.0,
                     "блок на " + formatVl(distance) + " бл. (жёсткий предел " + formatVl(hard) + ")");
-            return confBool("settings.enforcement", true);
+            return enforcementEnabled();
         }
         if (distance > max) {
             return flag(player, data, CheckId.BLOCKREACH, 1.0,

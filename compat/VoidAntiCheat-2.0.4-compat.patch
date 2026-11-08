@@ -112,7 +112,7 @@
      /** Только для тестов/диагностики: состояние без создания. */
      PlayerData peek(Player player) {
          return player == null ? null : players.get(player.getUniqueId());
-@@ -371,20 +430,96 @@
+@@ -371,20 +430,109 @@
          return mode == GameMode.SURVIVAL || mode == GameMode.ADVENTURE;
      }
  
@@ -210,10 +210,23 @@
 +        return false;
 +    }
 +
++    /**
++     * Единственная точка правды для «можно ли что-то отменять/возвращать».
++     *
++     * <p>Раньше часть коррекций проверяла {@code settings.enforcement} сама, а
++     * часть — нет: откат при «скачке позиции», аварийная отмена FastBreak и
++     * FastPlace при превышении лимита на 2 срабатывали даже в режиме
++     * наблюдения. Для режима «только алерты» это недопустимо — проверка
++     * должна молчать, а не телепортировать игрока назад.</p>
++     */
++    private boolean enforcementEnabled() {
++        return enforcementEnabled();
++    }
++
      private boolean inGrace(PlayerData data) {
          return System.currentTimeMillis() < data.graceUntilMillis;
      }
-@@ -396,10 +531,16 @@
+@@ -396,10 +544,16 @@
      @EventHandler(priority = EventPriority.MONITOR)
      public void onJoin(PlayerJoinEvent event) {
          createData(event.getPlayer(), true);
@@ -230,7 +243,7 @@
          players.remove(event.getPlayer().getUniqueId());
          alertsOff.remove(event.getPlayer().getUniqueId());
      }
-@@ -410,6 +551,10 @@
+@@ -410,6 +564,10 @@
          if (event.getTo() != null) {
              grantGrace(data, confLong("settings.teleport-grace-ms", 1750L));
              data.resetMovement(event.getTo(), Bukkit.getCurrentTick(), System.nanoTime(), event.getPlayer().isOnGround());
@@ -241,7 +254,7 @@
              data.clearSustainAll();
              updateSafeLocation(event.getPlayer(), event.getTo(), data);
          }
-@@ -420,6 +565,7 @@
+@@ -420,6 +578,7 @@
          PlayerData data = data(event.getPlayer());
          grantGrace(data, confLong("settings.respawn-grace-ms", 3500L));
          data.resetMovement(event.getRespawnLocation(), Bukkit.getCurrentTick(), System.nanoTime(), true);
@@ -249,7 +262,7 @@
          data.safeLocation = event.getRespawnLocation().clone();
          data.clearSustainAll();
      }
-@@ -430,6 +576,7 @@
+@@ -430,6 +589,7 @@
          grantGrace(data, confLong("settings.world-change-grace-ms", 2500L));
          data.resetMovement(event.getPlayer().getLocation(), Bukkit.getCurrentTick(), System.nanoTime(),
                  event.getPlayer().isOnGround());
@@ -257,7 +270,16 @@
          data.clearSustainAll();
      }
  
-@@ -774,11 +921,19 @@
+@@ -564,7 +724,7 @@
+ 
+         maybeAlert(player, data, check, cfg, state, details, now);
+ 
+-        boolean enforcement = confBool("settings.enforcement", true);
++        boolean enforcement = enforcementEnabled();
+         long aboveSetback = cfg.setbackVl() > 0
+                 ? state.aboveForMillis(VL_SUSTAIN_SETBACK, cfg.setbackVl(), now) : 0L;
+         long aboveCancel = cfg.cancelVl() > 0
+@@ -774,11 +934,19 @@
      }
  
      /** VoidPvP (или другой плагин без кд атаки) делает высокий CPS легальным. */
@@ -279,7 +301,7 @@
              if (fastAttackCache) {
                  getLogger().info("Обнаружен режим без кд атаки: сырой CPS не считается автокликером, "
                          + "проверяется только ровность интервалов.");
-@@ -787,6 +942,49 @@
+@@ -787,6 +955,49 @@
          return fastAttackCache;
      }
  
@@ -329,7 +351,16 @@
      private double currentTps() {
          double[] tps = Bukkit.getTPS();
          return tps.length == 0 ? 20.0 : Math.min(20.0, tps[0]);
-@@ -879,6 +1077,32 @@
+@@ -866,7 +1077,7 @@
+                 || to.getPitch() < -90.5f || to.getPitch() > 90.5f
+                 || to.getYaw() < -100_000f || to.getYaw() > 100_000f) {
+             flag(player, data, CheckId.BADPACKETS, 2.0, "невозможные координаты/углы");
+-            if (confBool("settings.enforcement", true)) {
++            if (enforcementEnabled()) {
+                 event.setTo(event.getFrom().clone());
+             }
+             data.resetMovement(event.getFrom(), tick, nowNanos, player.isOnGround());
+@@ -879,6 +1090,32 @@
              return;
          }
  
@@ -362,7 +393,44 @@
          double dx = to.getX() - data.lastX;
          double dy = to.getY() - data.lastY;
          double dz = to.getZ() - data.lastZ;
-@@ -1515,15 +1739,24 @@
+@@ -903,8 +1140,13 @@
+         if ((horizontal > teleportDelta || Math.abs(dy) > teleportDelta) && !inGrace(data)) {
+             flag(player, data, CheckId.BADPACKETS, 2.0,
+                     "скачок позиции " + formatVl(Math.max(horizontal, Math.abs(dy))) + " бл.");
+-            event.setTo(safeOr(data, event.getFrom()));
+-            data.resetMovement(event.getTo(), tick, nowNanos, player.isOnGround());
++            if (enforcementEnabled()) {
++                event.setTo(safeOr(data, event.getFrom()));
++            }
++            // Состояние фиксируем в любом случае: иначе следующий шаг посчитается
++            // от старой точки и даст ложную улику (и это не «смягчение», это
++            // корректная синхронизация).
++            data.resetMovement(event.getTo() == null ? to : event.getTo(), tick, nowNanos, player.isOnGround());
+             return;
+         }
+ 
+@@ -952,7 +1194,10 @@
+             noclipCheck(player, data, to, env, nowMillis);
+         }
+ 
+-        if (data.setbackRequested) {
++        // setbackRequested выставляется только внутри flag() после проверки
++        // enforcement, но проверяем ещё раз явно: это единственное место, где
++        // игрока физически возвращают назад.
++        if (data.setbackRequested && enforcementEnabled()) {
+             Location safe = safeOr(data, to);
+             event.setTo(safe);
+             data.resetMovement(safe, tick, nowNanos, true);
+@@ -1494,7 +1739,7 @@
+         ReachVerdict verdict = measureReach(attacker, data, target, now);
+         if (verdict.hard()) {
+             flag(attacker, data, CheckId.REACH, 2.0, verdict.details());
+-            if (confBool("settings.enforcement", true)) {
++            if (enforcementEnabled()) {
+                 event.setCancelled(true);
+             }
+         } else if (verdict.distance() > verdict.limit()) {
+@@ -1515,15 +1760,24 @@
          Vector eye = attacker.getEyeLocation().toVector();
          double current = boxDistance(eye, box);
  
@@ -389,7 +457,7 @@
                  ? confDouble("combat.reach-touch-max-blocks", 3.65)
                  : confDouble("combat.reach-max-blocks", 3.45);
          if (data.bedrock) {
-@@ -1534,7 +1767,7 @@
+@@ -1534,7 +1788,7 @@
              limit = Math.max(limit, interaction + 0.42);
          }
          double pingComp = Math.min(confDouble("combat.reach-ping-comp-max-blocks", 0.45),
@@ -398,7 +466,7 @@
                          * confDouble("combat.reach-ping-comp-per-100ms", 0.045));
          limit += pingComp;
          Vector targetVelocity = target.getVelocity();
-@@ -1543,7 +1776,7 @@
+@@ -1543,7 +1797,7 @@
          limit += Math.min(confDouble("combat.reach-move-comp-max-blocks", 0.35),
                  targetBps * confDouble("combat.reach-move-comp-per-bps", 0.02));
          double tolerance = Math.min(confDouble("combat.reach-max-tolerance", 1.30),
@@ -407,7 +475,7 @@
          limit *= tolerance;
  
          double hard = confDouble("combat.reach-hard-cancel-blocks", 4.80) * Math.min(1.15, tolerance);
-@@ -1578,10 +1811,23 @@
+@@ -1578,10 +1832,23 @@
              return;
          }
  
@@ -434,7 +502,7 @@
              flag(attacker, data, CheckId.KILLAURA, 1.0, distinct + " разных целей за 1 сек.");
              data.attacks.clear();
          }
-@@ -1645,11 +1891,15 @@
+@@ -1645,11 +1912,15 @@
                  lastSecond++;
              }
          }
@@ -452,7 +520,15 @@
          int maxCps = touch
                  ? confInt("combat.autoclicker-touch-cps", 27)
                  : confInt("combat.autoclicker-cps", 24);
-@@ -1716,6 +1966,14 @@
+@@ -1711,11 +1982,21 @@
+         }
+         long now = System.currentTimeMillis();
+         data.lastBlockChangeMillis = now;
+-        if (blockReachViolation(player, data, event.getBlock())) {
++        // blockReachViolation() всегда фиксирует улику (это нужно и в режиме
++        // наблюдения), а возвращает true только когда блок надо отменить.
++        if (blockReachViolation(player, data, event.getBlock()) && enforcementEnabled()) {
+             event.setCancelled(true);
              return;
          }
          int tick = Bukkit.getCurrentTick();
@@ -467,7 +543,16 @@
          if (data.lastBreakTick == tick) {
              data.breaksThisTick++;
          } else {
-@@ -1739,6 +1997,46 @@
+@@ -1733,12 +2014,54 @@
+                     data.breaksThisTick >= sameTickLimit
+                             ? data.breaksThisTick + " блоков за тик"
+                             : data.breaks.size() + " блоков/сек");
+-            if (cancel || data.breaksThisTick > sameTickLimit + 2) {
++            // Аварийная отмена (> лимит + 2) раньше срабатывала всегда и
++            // игнорировала enforcement — в режиме наблюдения это ломало бур.
++            if (enforcementEnabled() && (cancel || data.breaksThisTick > sameTickLimit + 2)) {
+                 event.setCancelled(true);
+             }
          }
      }
  
@@ -514,7 +599,25 @@
      @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
      public void onBlockPlace(BlockPlaceEvent event) {
          Player player = event.getPlayer();
-@@ -1782,8 +2080,16 @@
+@@ -1748,7 +2071,7 @@
+         }
+         long now = System.currentTimeMillis();
+         data.lastBlockChangeMillis = now;
+-        if (blockReachViolation(player, data, event.getBlockPlaced())) {
++        if (blockReachViolation(player, data, event.getBlockPlaced()) && enforcementEnabled()) {
+             event.setCancelled(true);
+             return;
+         }
+@@ -1770,7 +2093,7 @@
+                     data.placesThisTick >= sameTickLimit
+                             ? data.placesThisTick + " блоков за тик"
+                             : data.places.size() + " блоков/сек");
+-            if (cancel || data.placesThisTick > sameTickLimit + 2) {
++            if (enforcementEnabled() && (cancel || data.placesThisTick > sameTickLimit + 2)) {
+                 event.setCancelled(true);
+                 return;
+             }
+@@ -1782,12 +2105,20 @@
          Location center = block.getLocation().add(0.5, 0.5, 0.5);
          double distance = player.getEyeLocation().distance(center);
          double tolerance = data.lag.tolerance(player.getPing(), currentTps(), lagLimits);
@@ -533,7 +636,12 @@
          if (distance > hard) {
              flag(player, data, CheckId.BLOCKREACH, 2.0,
                      "блок на " + formatVl(distance) + " бл. (жёсткий предел " + formatVl(hard) + ")");
-@@ -2035,6 +2341,160 @@
+-            return confBool("settings.enforcement", true);
++            return enforcementEnabled();
+         }
+         if (distance > max) {
+             return flag(player, data, CheckId.BLOCKREACH, 1.0,
+@@ -2035,6 +2366,160 @@
          return sender.hasPermission("voidanticheat.admin");
      }
  
@@ -694,7 +802,7 @@
      @Override
      public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
          if (!admin(sender)) {
-@@ -2047,9 +2507,34 @@
+@@ -2047,9 +2532,34 @@
                  reloadConfig();
                  loadCheckSettings();
                  loadLagLimits();
@@ -729,7 +837,7 @@
              case "alerts" -> {
                  if (!(sender instanceof Player player)) {
                      sender.sendMessage(comp("&7Команда alerts доступна только игроку."));
-@@ -2064,7 +2549,11 @@
+@@ -2064,7 +2574,11 @@
                  return true;
              }
              case "info" -> {
@@ -742,7 +850,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2106,7 +2595,11 @@
+@@ -2106,7 +2620,11 @@
                  return true;
              }
              case "reset" -> {
@@ -755,7 +863,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2128,7 +2621,11 @@
+@@ -2128,7 +2646,11 @@
                  return true;
              }
              case "setback" -> {
@@ -768,7 +876,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2142,11 +2639,22 @@
+@@ -2142,11 +2664,22 @@
                  return true;
              }
              case "help" -> {
@@ -791,7 +899,7 @@
                      sendHelp(sender);
                      return true;
                  }
-@@ -2163,41 +2671,150 @@
+@@ -2163,41 +2696,150 @@
      }
  
      private void sendHelp(CommandSender sender) {
