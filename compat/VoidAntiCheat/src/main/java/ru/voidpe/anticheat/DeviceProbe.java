@@ -163,7 +163,8 @@ final class DeviceProbe {
 
         /** Медианный интервал движения, мс; 0 — данных нет. */
         long medianInterval() {
-            return median(intervalCount, true);
+            // Math.round, а не приведение: median() считает в double.
+            return Math.round(median(intervalCount, true));
         }
 
         /** Медианный шаг поворота, градусы; 0 — данных нет. */

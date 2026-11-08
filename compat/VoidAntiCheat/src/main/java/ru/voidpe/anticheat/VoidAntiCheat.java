@@ -1891,7 +1891,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         // Ввод: явный сенсор/мобильная ОС/телефон с КМ — сенсорный лимит.
         // Неизвестное устройство тоже получает сенсорный (мягкий) лимит:
         // отсутствие данных не должно ухудшать положение игрока.
-        boolean touchLike = inputKindOf(player, data).softLimits();
+        boolean touchLike = inputKindOf(attacker, data).softLimits();
         double limit = touchLike
                 ? confDouble("combat.reach-touch-max-blocks", 3.65)
                 : confDouble("combat.reach-max-blocks", 3.45);
@@ -2947,11 +2947,12 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 // существующий шаблон info-header в конфигах.
                 String source = device.liveSession() ? "сессия ядра"
                         : device.kind() == DeviceProbe.InputKind.UNKNOWN ? "данных нет" : "Floodgate";
+                String model = device.model().isEmpty() ? "—" : device.model();
                 tell(sender, "info-input",
                         "{kind}", device.kind().label(),
                         "{platform}", device.platform(),
                         "{raw_input}", device.rawInput(),
-                        "{model}", device.model().isEmpty() ? "—" : device.model(),
+                        "{model}", model,
                         "{ui}", device.uiProfile(),
                         "{source}", source,
                         "{verdict}", verdictText(device.verdict()));
