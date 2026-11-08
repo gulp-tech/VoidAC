@@ -2947,7 +2947,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 // существующий шаблон info-header в конфигах.
                 String source = device.liveSession() ? "сессия ядра"
                         : device.kind() == DeviceProbe.InputKind.UNKNOWN ? "данных нет" : "Floodgate";
-                String model = device.model().isEmpty() ? "—" : device.model();
+                String model = device.deviceModel().isEmpty() ? "—" : device.deviceModel();
                 tell(sender, "info-input",
                         "{kind}", device.kind().label(),
                         "{platform}", device.platform(),
