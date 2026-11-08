@@ -51,10 +51,31 @@ jobs:
             21
             25
 
-      - name: Set up Gradle 9.4.1
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "9.4.1"
+      # Marketplace-экшен setup-gradle падал на транзиентном 504 от CDN
+      # (gradle/actions/setup-gradle@v4). Скачиваем дистрибутив сами с
+      # повторами: это единственный внешний артефакт, без которого сборка
+      # не стартует.
+      - name: Install Gradle 9.4.1
+        run: |
+          set -euo pipefail
+          ok=false
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors \
+                 -o /tmp/gradle.zip \
+                 https://services.gradle.org/distributions/gradle-9.4.1-bin.zip; then
+              ok=true; break
+            fi
+            echo "::warning::скачивание Gradle, попытка $attempt не удалась"
+            sleep 15
+          done
+          if [ "$ok" != true ]; then
+            echo "::error::не удалось скачать дистрибутив Gradle 9.4.1"
+            exit 1
+          fi
+          ls -l /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /opt
+          echo "/opt/gradle-9.4.1/bin" >> "$GITHUB_PATH"
+          /opt/gradle-9.4.1/bin/gradle --version | grep -E '^(Gradle|JVM|Launcher)'
 
       - name: Configure Git identity for Paperweight
         run: |
