@@ -174,37 +174,47 @@ jobs:
       # а не предполагать: ставим Maven и собираем второй раз против того же
       # локального API (scope provided — API не попадёт в JAR).
       # continue-on-error маскирует провал (шаг показывается зелёным даже при
-      # exit 1), поэтому результат пишем в отдельный маркер и явно выводим в
-      # отчёт: Maven-сборка НЕ должна выглядеть проверенной, если не собралась.
+      # exit 1), поэтому результат пишем в маркер. Любой путь падения обязан
+      # обновить маркер: иначе «не запускалась» скрывает настоящую причину.
       - name: Maven build (проверка pom.xml, не блокирует Gradle-результат)
         id: maven
         continue-on-error: true
         working-directory: compat/VoidAntiCheat
         run: |
-          echo "MAVEN_STATUS=НЕ ЗАПУСКАЛАСЬ" > /tmp/maven-status.txt
-          set -euo pipefail
-          exec > >(tee /tmp/maven.log) 2>&1
-          ok=false
-          for attempt in 1 2 3; do
-            if curl -fsSL --retry 5 --retry-all-errors -o /tmp/mvn.tar.gz \
-                 https://dlcdn.apache.org/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz; then
-              ok=true; break
-            fi
-            sleep 10
+          set -uo pipefail
+          STATUS=/tmp/maven-status.txt
+          echo "MAVEN_STATUS=НЕ ЗАПУСКАЛАСЬ" > "$STATUS"
+          fail() { echo "MAVEN_STATUS=$1" > "$STATUS"; echo "$1"; exit 1; }
+
+          # Дистрибутив Maven: main CDN, затем официальное зеркало-архив.
+          MVN_OK=false
+          for URL in \
+            https://dlcdn.apache.org/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz \
+            https://archive.apache.org/dist/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz; do
+            for attempt in 1 2 3; do
+              if curl -fsSL --retry 3 --retry-all-errors --max-time 120 -o /tmp/mvn.tar.gz "$URL"; then
+                MVN_OK=true; break 2
+              fi
+              echo "попытка $attempt: $URL не скачался"
+              sleep 5
+            done
           done
-          [ "$ok" = true ] || { echo "::warning::Maven не скачался"; exit 1; }
-          tar xzf /tmp/mvn.tar.gz -C /opt
+          [ "$MVN_OK" = true ] || fail "СКАЧИВАНИЕ MAVEN НЕ УДАЛОСЬ (сеть раннера)"
+          tar xzf /tmp/mvn.tar.gz -C /opt || fail "РАСПАКОВКА MAVEN НЕ УДАЛАСЬ"
           MVN=/opt/apache-maven-3.9.9/bin/mvn
-          "$MVN" -B -q -version
-          if ! "$MVN" -B package -DskipTests; then
-            ERR=$(grep -E "ERROR|BUILD FAILURE" /tmp/maven.log | head -5 | tr '\n' ' ')
-            echo "MAVEN_STATUS=ОШИБКА: ${ERR:0:300}" > /tmp/maven-status.txt
-            exit 1
+          [ -x "$MVN" ] || fail "НЕТ БИНАРНИКА $MVN"
+          "$MVN" -B -version | head -3
+
+          exec > >(tee /tmp/maven.log) 2>&1
+          if "$MVN" -B package -DskipTests; then
+            MJAR=$(ls target/VoidAntiCheat-*.jar 2>/dev/null | head -1)
+            [ -n "$MJAR" ] || fail "MAVEN СОБРАЛ, НО JAR НЕ НАЙДЕН"
+            echo "MAVEN_STATUS=СОБРАН ($MJAR, $(stat -c '%s' "$MJAR") байт)" > "$STATUS"
+            echo "MAVEN_OK"
+          else
+            ERR=$(grep -E "\[ERROR\]|BUILD FAILURE" /tmp/maven.log | head -4 | tr '\n' ' ')
+            fail "ОШИБКА СБОРКИ: ${ERR:0:280}"
           fi
-          ls -l target/*.jar
-          MJAR=$(ls target/VoidAntiCheat-*.jar | head -1)
-          echo "MAVEN_STATUS=СОБРАН ($MJAR, $(stat -c '%s' "$MJAR") байт)" > /tmp/maven-status.txt
-          echo "MAVEN_OK"
 
       - name: Verify JAR contents and checksum
         id: verify
