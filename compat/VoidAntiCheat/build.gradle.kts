@@ -87,14 +87,23 @@ tasks.register("verifyNoApiInJar") {
     dependsOn(tasks.jar)
     doLast {
         val jarFile = tasks.jar.get().archiveFile.get().asFile
+        // Явный обход Enumeration: `zip.entries().asSequence()` в Kotlin DSL
+        // не выводит тип (`Cannot infer type for type parameter 'T'`), поэтому
+        // цикл написан в java-стиле и без хрупкого вывода типов.
+        val leaked = mutableListOf<String>()
         java.util.zip.ZipFile(jarFile).use { zip ->
-            val leaked = zip.entries().asSequence()
-                .map { it.name }
-                .filter { it.startsWith("org/purpurmc/") || it.startsWith("org/bukkit/") || it.startsWith("io/papermc/") }
-                .toList()
-            if (leaked.isNotEmpty()) {
-                throw GradleException("В JAR попал API сервера: ${leaked.take(5)}")
+            val entries = zip.entries()
+            while (entries.hasMoreElements()) {
+                val name = entries.nextElement().name
+                if (name.startsWith("org/purpurmc/")
+                    || name.startsWith("org/bukkit/")
+                    || name.startsWith("io/papermc/")) {
+                    leaked.add(name)
+                }
             }
+        }
+        if (leaked.isNotEmpty()) {
+            throw GradleException("В JAR попал API сервера: ${leaked.take(5)}")
         }
     }
 }
