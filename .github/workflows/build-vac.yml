@@ -170,12 +170,30 @@ jobs:
           test -n "$JAR"
           echo "JAR_PATH=$JAR" >> "$GITHUB_OUTPUT"
 
-      - name: Maven build (справочно, не блокирует)
+      # pom.xml намеренно не менялся, но его работоспособность надо доказать,
+      # а не предполагать: ставим Maven и собираем второй раз против того же
+      # локального API (scope provided — API не попадёт в JAR).
+      - name: Maven build (проверка pom.xml, не блокирует Gradle-результат)
+        id: maven
         continue-on-error: true
         working-directory: compat/VoidAntiCheat
         run: |
-          command -v mvn >/dev/null && mvn -B -q -DskipTests package \
-            || echo "Maven не установлен в образе — пропускаю (основная сборка Gradle)"
+          set -euo pipefail
+          ok=false
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 5 --retry-all-errors -o /tmp/mvn.tar.gz \
+                 https://dlcdn.apache.org/maven/maven-3/3.9.9/binaries/apache-maven-3.9.9-bin.tar.gz; then
+              ok=true; break
+            fi
+            sleep 10
+          done
+          [ "$ok" = true ] || { echo "::warning::Maven не скачался"; exit 1; }
+          tar xzf /tmp/mvn.tar.gz -C /opt
+          MVN=/opt/apache-maven-3.9.9/bin/mvn
+          "$MVN" -B -q -version
+          "$MVN" -B package -DskipTests
+          ls -l target/*.jar
+          echo "MAVEN_OK"
 
       - name: Verify JAR contents and checksum
         id: verify
@@ -210,6 +228,44 @@ jobs:
             echo "| Java | $(java -version 2>&1 | head -1) |"
             echo "| Gradle | $(gradle --version | grep '^Gradle' | cut -d' ' -f2) |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          # Полный отчёт о содержимом JAR — в комментарий к коммиту, чтобы он
+          # был доступен без скачивания артефакта.
+          {
+            echo "### JAR проверен (\`${GITHUB_SHA:0:7}\`)"
+            echo ""
+            echo "| Параметр | Значение |"
+            echo "|---|---|"
+            echo "| Файл | \`$(basename "$JAR")\` |"
+            echo "| Размер | $SIZE байт |"
+            echo "| SHA-256 | \`$SHA\` |"
+            echo "| API сборки | \`${{ steps.api.outputs.API_VERSION }}\` (compileOnly) |"
+            echo ""
+            echo "<details><summary>plugin.yml</summary>"
+            echo ""
+            echo "\`\`\`yaml"
+            unzip -p "$JAR" plugin.yml
+            echo "\`\`\`"
+            echo "</details>"
+            echo ""
+            echo "**Классы VAC в JAR:** $(unzip -l "$JAR" | grep -c 'ru/voidpe/anticheat/.*\.class')"
+            echo ""
+            echo "<details><summary>список классов</summary>"
+            echo ""
+            echo "\`\`\`"
+            unzip -l "$JAR" | grep '\.class' | awk '{print $4}'
+            echo "\`\`\`"
+            echo "</details>"
+            echo ""
+            echo "**Ресурсы:**"
+            echo ""
+            echo "\`\`\`"
+            unzip -l "$JAR" | grep -v '\.class' | awk '{print $4}' | grep -v '^$'
+            echo "\`\`\`"
+            echo ""
+            echo "**API сервера в JAR:** $(unzip -l "$JAR" | grep -cE ' (org/bukkit|io/papermc|org/purpurmc)/') (ожидается 0)"
+          } > /tmp/report.md
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/comments" -f body="$(cat /tmp/report.md)" || true
 
       # Квота на artifacts в приватных репозиториях уже исчерпана
       # ("Artifact storage quota has been hit"), поэтому загрузка не должна
