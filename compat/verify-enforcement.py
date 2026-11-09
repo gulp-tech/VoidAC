@@ -307,7 +307,7 @@ def main() -> int:
         fail("метка AVG не выводится")
 
     checks += 1
-    if "lastAvgLabelMillis" not in src_text:
+    if "lastAvgLabelMillis" not in susp_text:
         fail("метка AVG без троттлинга — пересборка каждый тик")
 
     # --- 5. периодическая задача ничего не делает сама ----------------------
