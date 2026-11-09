@@ -9,17 +9,19 @@
  import org.bukkit.plugin.PluginManager;
  import org.bukkit.plugin.java.JavaPlugin;
  import org.bukkit.potion.PotionEffect;
-@@ -127,6 +129,9 @@
+@@ -127,6 +129,11 @@
      private final Set<UUID> alertsOff = new HashSet<>();
  
      private FloodgateHook floodgate;
 +    private BedrockCoreBridge coreBridge;
 +    private AntiEspManager antiEsp;
 +    private DeviceProbe deviceProbe;
++    private final ToolExempt toolExempt = new ToolExempt();
++    private ToolExempt.Settings drillSettings = ToolExempt.Settings.disabled();
      private RegionHook regions;
      private BukkitTask secondTask;
      private ExecutorService ioExecutor;
-@@ -134,6 +139,12 @@
+@@ -134,6 +141,12 @@
      private LagCompensation.Limits lagLimits = LagCompensation.Limits.defaults();
      /** null — ещё не проверяли; см. fastAttackServer(). */
      private Boolean fastAttackCache;
@@ -32,7 +34,15 @@
  
      private Attribute movementSpeedAttribute;
      private Attribute interactionRangeAttribute;
-@@ -170,6 +181,19 @@
+@@ -149,6 +162,7 @@
+     public void onEnable() {
+         saveDefaultConfig();
+         loadCheckSettings();
++        loadDrillSettings();
+         loadLagLimits();
+         // Реестры — единственное место, зависящее от версии API. Если в новой
+         // версии сервера что-то переименовали, античит должен работать дальше
+@@ -170,6 +184,19 @@
                      + ": " + failure.getMessage() + ") — проверки работают на консервативных значениях по умолчанию");
          }
          floodgate = new FloodgateHook(getLogger());
@@ -52,7 +62,7 @@
          regions = new RegionHook(getLogger());
          ioExecutor = Executors.newSingleThreadExecutor(runnable -> {
              Thread thread = new Thread(runnable, "VoidAntiCheat-IO");
-@@ -205,6 +229,10 @@
+@@ -205,6 +232,10 @@
          if (ioExecutor != null) {
              ioExecutor.shutdownNow();
          }
@@ -63,7 +73,7 @@
          players.clear();
          alertsOff.clear();
      }
-@@ -215,7 +243,9 @@
+@@ -215,7 +246,9 @@
       * метод принимает adventure {@code Key} — прямой вызов давал NoSuchMethodError
       * и все проверки оставались на консервативных значениях по умолчанию.
       */
@@ -74,7 +84,29 @@
          if (registry == null) {
              return null;
          }
-@@ -289,6 +319,10 @@
+@@ -264,6 +297,21 @@
+         frostWalkerEnchant = registryLookup(Registry.ENCHANTMENT, "frost_walker");
+     }
+ 
++    /**
++     * Настройки исключения для инструментов с серверным мультиблоком (бур).
++     * Читаются из {@code world.drill-exempt.*}; при отсутствии ключей остаются
++     * безопасные значения, а само исключение включено.
++     */
++    private void loadDrillSettings() {
++        drillSettings = ToolExempt.Settings.of(
++                confBool("world.drill-exempt.enabled", true),
++                getConfig().getStringList("world.drill-exempt.namespaces"),
++                getConfig().getStringList("world.drill-exempt.keys"),
++                getConfig().getStringList("world.drill-exempt.name-contains"),
++                confInt("world.drill-exempt.max-level", 5));
++        toolExempt.invalidate();
++    }
++
+     private void loadCheckSettings() {
+         settings.clear();
+         for (CheckId check : CheckId.values()) {
+@@ -289,6 +337,10 @@
  
      // ------------------------------------------------------------ конфиг-хелперы
  
@@ -85,7 +117,7 @@
      private boolean confBool(String path, boolean fallback) {
          return getConfig().getBoolean(path, fallback);
      }
-@@ -326,10 +360,24 @@
+@@ -326,10 +378,24 @@
          } else {
              data.bedrock = confBool("settings.check-all-if-floodgate-missing", true);
          }
@@ -110,7 +142,7 @@
          data.profile = data.bedrock ? "bedrock" : "java";
          data.bypassAll = player.hasPermission("voidanticheat.bypass");
          data.excludedHere = isExcluded(player.getLocation());
-@@ -343,6 +391,118 @@
+@@ -343,6 +409,118 @@
          return data;
      }
  
@@ -229,7 +261,7 @@
      /** Только для тестов/диагностики: состояние без создания. */
      PlayerData peek(Player player) {
          return player == null ? null : players.get(player.getUniqueId());
-@@ -371,20 +531,109 @@
+@@ -371,20 +549,109 @@
          return mode == GameMode.SURVIVAL || mode == GameMode.ADVENTURE;
      }
  
@@ -343,7 +375,7 @@
      private boolean inGrace(PlayerData data) {
          return System.currentTimeMillis() < data.graceUntilMillis;
      }
-@@ -396,10 +645,16 @@
+@@ -396,10 +663,16 @@
      @EventHandler(priority = EventPriority.MONITOR)
      public void onJoin(PlayerJoinEvent event) {
          createData(event.getPlayer(), true);
@@ -360,7 +392,7 @@
          players.remove(event.getPlayer().getUniqueId());
          alertsOff.remove(event.getPlayer().getUniqueId());
      }
-@@ -410,6 +665,10 @@
+@@ -410,6 +683,10 @@
          if (event.getTo() != null) {
              grantGrace(data, confLong("settings.teleport-grace-ms", 1750L));
              data.resetMovement(event.getTo(), Bukkit.getCurrentTick(), System.nanoTime(), event.getPlayer().isOnGround());
@@ -371,7 +403,7 @@
              data.clearSustainAll();
              updateSafeLocation(event.getPlayer(), event.getTo(), data);
          }
-@@ -420,6 +679,7 @@
+@@ -420,6 +697,7 @@
          PlayerData data = data(event.getPlayer());
          grantGrace(data, confLong("settings.respawn-grace-ms", 3500L));
          data.resetMovement(event.getRespawnLocation(), Bukkit.getCurrentTick(), System.nanoTime(), true);
@@ -379,7 +411,7 @@
          data.safeLocation = event.getRespawnLocation().clone();
          data.clearSustainAll();
      }
-@@ -430,6 +690,7 @@
+@@ -430,6 +708,7 @@
          grantGrace(data, confLong("settings.world-change-grace-ms", 2500L));
          data.resetMovement(event.getPlayer().getLocation(), Bukkit.getCurrentTick(), System.nanoTime(),
                  event.getPlayer().isOnGround());
@@ -387,7 +419,7 @@
          data.clearSustainAll();
      }
  
-@@ -564,7 +825,7 @@
+@@ -564,7 +843,7 @@
  
          maybeAlert(player, data, check, cfg, state, details, now);
  
@@ -396,7 +428,7 @@
          long aboveSetback = cfg.setbackVl() > 0
                  ? state.aboveForMillis(VL_SUSTAIN_SETBACK, cfg.setbackVl(), now) : 0L;
          long aboveCancel = cfg.cancelVl() > 0
-@@ -774,11 +1035,19 @@
+@@ -774,11 +1053,19 @@
      }
  
      /** VoidPvP (или другой плагин без кд атаки) делает высокий CPS легальным. */
@@ -418,7 +450,7 @@
              if (fastAttackCache) {
                  getLogger().info("Обнаружен режим без кд атаки: сырой CPS не считается автокликером, "
                          + "проверяется только ровность интервалов.");
-@@ -787,6 +1056,49 @@
+@@ -787,6 +1074,49 @@
          return fastAttackCache;
      }
  
@@ -468,7 +500,7 @@
      private double currentTps() {
          double[] tps = Bukkit.getTPS();
          return tps.length == 0 ? 20.0 : Math.min(20.0, tps[0]);
-@@ -866,7 +1178,7 @@
+@@ -866,7 +1196,7 @@
                  || to.getPitch() < -90.5f || to.getPitch() > 90.5f
                  || to.getYaw() < -100_000f || to.getYaw() > 100_000f) {
              flag(player, data, CheckId.BADPACKETS, 2.0, "невозможные координаты/углы");
@@ -477,7 +509,7 @@
                  event.setTo(event.getFrom().clone());
              }
              data.resetMovement(event.getFrom(), tick, nowNanos, player.isOnGround());
-@@ -879,6 +1191,32 @@
+@@ -879,6 +1209,32 @@
              return;
          }
  
@@ -510,7 +542,7 @@
          double dx = to.getX() - data.lastX;
          double dy = to.getY() - data.lastY;
          double dz = to.getZ() - data.lastZ;
-@@ -903,8 +1241,13 @@
+@@ -903,8 +1259,13 @@
          if ((horizontal > teleportDelta || Math.abs(dy) > teleportDelta) && !inGrace(data)) {
              flag(player, data, CheckId.BADPACKETS, 2.0,
                      "скачок позиции " + formatVl(Math.max(horizontal, Math.abs(dy))) + " бл.");
@@ -526,7 +558,7 @@
              return;
          }
  
-@@ -952,7 +1295,10 @@
+@@ -952,7 +1313,10 @@
              noclipCheck(player, data, to, env, nowMillis);
          }
  
@@ -538,7 +570,7 @@
              Location safe = safeOr(data, to);
              event.setTo(safe);
              data.resetMovement(safe, tick, nowNanos, true);
-@@ -1494,7 +1840,7 @@
+@@ -1494,7 +1858,7 @@
          ReachVerdict verdict = measureReach(attacker, data, target, now);
          if (verdict.hard()) {
              flag(attacker, data, CheckId.REACH, 2.0, verdict.details());
@@ -547,7 +579,7 @@
                  event.setCancelled(true);
              }
          } else if (verdict.distance() > verdict.limit()) {
-@@ -1510,20 +1856,43 @@
+@@ -1510,20 +1874,43 @@
       * Двусторонняя компенсация: минимальная дистанция по истории хитбокса
       * цели за окно пинга + допуск от скорости цели, джиттера и тач-ввода.
       */
@@ -593,7 +625,7 @@
                  ? confDouble("combat.reach-touch-max-blocks", 3.65)
                  : confDouble("combat.reach-max-blocks", 3.45);
          if (data.bedrock) {
-@@ -1534,7 +1903,7 @@
+@@ -1534,7 +1921,7 @@
              limit = Math.max(limit, interaction + 0.42);
          }
          double pingComp = Math.min(confDouble("combat.reach-ping-comp-max-blocks", 0.45),
@@ -602,7 +634,7 @@
                          * confDouble("combat.reach-ping-comp-per-100ms", 0.045));
          limit += pingComp;
          Vector targetVelocity = target.getVelocity();
-@@ -1543,7 +1912,7 @@
+@@ -1543,7 +1930,7 @@
          limit += Math.min(confDouble("combat.reach-move-comp-max-blocks", 0.35),
                  targetBps * confDouble("combat.reach-move-comp-per-bps", 0.02));
          double tolerance = Math.min(confDouble("combat.reach-max-tolerance", 1.30),
@@ -611,7 +643,7 @@
          limit *= tolerance;
  
          double hard = confDouble("combat.reach-hard-cancel-blocks", 4.80) * Math.min(1.15, tolerance);
-@@ -1574,14 +1943,28 @@
+@@ -1574,14 +1961,28 @@
          }
          long now = System.currentTimeMillis();
          recordAttack(data, target, now);
@@ -643,7 +675,7 @@
              flag(attacker, data, CheckId.KILLAURA, 1.0, distinct + " разных целей за 1 сек.");
              data.attacks.clear();
          }
-@@ -1645,11 +2028,11 @@
+@@ -1645,11 +2046,11 @@
                  lastSecond++;
              }
          }
@@ -657,24 +689,29 @@
          int maxCps = touch
                  ? confInt("combat.autoclicker-touch-cps", 27)
                  : confInt("combat.autoclicker-cps", 24);
-@@ -1711,17 +2094,31 @@
+@@ -1711,17 +2112,35 @@
          }
          long now = System.currentTimeMillis();
          data.lastBlockChangeMillis = now;
 -        if (blockReachViolation(player, data, event.getBlock())) {
 +        // blockReachViolation() всегда фиксирует улику (это нужно и в режиме
 +        // наблюдения), а возвращает true только когда блок надо отменить.
-+        if (blockReachViolation(player, data, event.getBlock()) && enforcementEnabled()) {
++        int tick = Bukkit.getCurrentTick();
++        // Бур ломает 3x3: центральный блок в пределах руки, а угловые лежат
++        // диагонально дальше ванильного лимита. Это серверная механика, а не
++        // дальний удар, поэтому BlockReach для такого инструмента не считается.
++        boolean drillTool = serverMultiBlockBreak(player, data, tick);
++        if (!drillTool && blockReachViolation(player, data, event.getBlock()) && enforcementEnabled()) {
              event.setCancelled(true);
              return;
          }
-         int tick = Bukkit.getCurrentTick();
+-        int tick = Bukkit.getCurrentTick();
 +        // Бур VoidEnchants (3x3 / 3x3x2) ломает блоки серверным расширением, а не
 +        // отдельными действиями игрока, поэтому FastBreak такие разрушения не
 +        // считает. Источник проверяется по факту: уровень чара лежит в PDC
 +        // инструмента (Namespace voidenchants, ключ drill) — клиент подделать его
 +        // не может. Отключается: world.fastbreak-server-multiblock-exempt.
-+        if (serverMultiBlockBreak(player, data, tick)) {
++        if (drillTool) {
 +            return;
 +        }
          if (data.lastBreakTick == tick) {
@@ -690,14 +727,18 @@
          data.breaks.addLast(now);
          pruneWindow(data.breaks, now, 1000L, 80);
          int sameTickLimit = confInt("world.fastbreak-same-tick", 4);
-@@ -1733,12 +2130,281 @@
+@@ -1733,12 +2152,275 @@
                      data.breaksThisTick >= sameTickLimit
                              ? data.breaksThisTick + " блоков за тик"
                              : data.breaks.size() + " блоков/сек");
 -            if (cancel || data.breaksThisTick > sameTickLimit + 2) {
 +            // Аварийная отмена (> лимит + 2) раньше срабатывала всегда и
 +            // игнорировала enforcement — в режиме наблюдения это ломало бур.
-+            if (enforcementEnabled() && (cancel || data.breaksThisTick > sameTickLimit + 2)) {
++            // Бур не отменяем никогда: его блоки — серверное расширение.
++            // Иначе при большом 3x3 счётчик перевалит за лимит+2 и вырежет
++            // часть блоков, хотя игрок ничего не нарушал.
++            if (!drillTool && enforcementEnabled()
++                    && (cancel || data.breaksThisTick > sameTickLimit + 2)) {
                  event.setCancelled(true);
              }
          }
@@ -719,6 +760,15 @@
 +     * минимальное число блоков за окно — одиночная жила не улика.</p>
 +     */
 +    private void autoMineCheck(Player player, PlayerData data, Block block, long now) {
++        // Бур сносит 3x3 разом: за окно набирается «доля руды», которая к
++        // AutoMine не имеет отношения. Если на сервере разрешено ломать руду
++        // расширением, такие разрушения не считаются охотой за рудой.
++        if (confBool("world.drill-exempt.exclude-from-automine", true)
++                && drillSettings.enabled()
++                && toolExempt.multiBlockTool(player.getInventory().getItemInMainHand(),
++                        drillSettings, Bukkit.getCurrentTick())) {
++            return;
++        }
 +        Material type = block.getType();
 +        boolean ore = isOreMaterial(type);
 +        data.brokenBlocks.addLast(new PlayerData.BrokenBlock(now, type, ore));
@@ -935,45 +985,26 @@
 +     * (Бур VoidEnchants I/II). Результат кэшируется на тик: копирование
 +     * метаданных предмета не нужно дёргать на каждый блок.
 +     */
++    /**
++     * Ломает ли текущий инструмент несколько блоков за одно действие сервера
++     * (бур VoidEnchants 3x3 / 3x3x2 и аналоги).
++     *
++     * <p>Определяется по метке на предмете через {@link ToolExempt}: раньше
++     * проверка была прибита к конкретным пространствам имён и типу значения,
++     * и на любом другом чаре не срабатывала — игрок получал ложные улики.</p>
++     */
 +    private boolean serverMultiBlockBreak(Player player, PlayerData data, int tick) {
 +        if (!confBool("world.fastbreak-server-multiblock-exempt", true)) {
 +            return false;
 +        }
-+        if (data.multiBreakTickId == tick) {
-+            return data.multiBreakTick;
-+        }
-+        data.multiBreakTickId = tick;
-+        data.multiBreakTick = false;
-+        try {
-+            ItemStack tool = player.getInventory().getItemInMainHand();
-+            if (tool == null || tool.getType().isAir() || !tool.hasItemMeta()) {
-+                return false;
-+            }
-+            PersistentDataContainer pdc = tool.getItemMeta().getPersistentDataContainer();
-+            for (NamespacedKey key : pdc.getKeys()) {
-+                if (!"drill".equals(key.getKey())) {
-+                    continue;
-+                }
-+                String namespace = key.getNamespace();
-+                if (!"voidenchants".equals(namespace) && !"voiditems".equals(namespace)) {
-+                    continue;
-+                }
-+                Integer level = pdc.get(key, PersistentDataType.INTEGER);
-+                if (level != null && level > 0) {
-+                    data.multiBreakTick = true;
-+                    return true;
-+                }
-+            }
-+        } catch (Throwable ignored) {
-+            // Неизвестный предмет — считаем обычным разрушением, проверка работает.
-+        }
-+        return false;
++        ItemStack tool = player.getInventory().getItemInMainHand();
++        return toolExempt.multiBlockTool(tool, drillSettings, tick);
 +    }
 +
      @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
      public void onBlockPlace(BlockPlaceEvent event) {
          Player player = event.getPlayer();
-@@ -1748,7 +2414,7 @@
+@@ -1748,7 +2430,7 @@
          }
          long now = System.currentTimeMillis();
          data.lastBlockChangeMillis = now;
@@ -982,7 +1013,7 @@
              event.setCancelled(true);
              return;
          }
-@@ -1770,11 +2436,13 @@
+@@ -1770,11 +2452,13 @@
                      data.placesThisTick >= sameTickLimit
                              ? data.placesThisTick + " блоков за тик"
                              : data.places.size() + " блоков/сек");
@@ -997,7 +1028,7 @@
          scaffoldCheck(player, data, event, now);
      }
  
-@@ -1782,12 +2450,20 @@
+@@ -1782,12 +2466,20 @@
          Location center = block.getLocation().add(0.5, 0.5, 0.5);
          double distance = player.getEyeLocation().distance(center);
          double tolerance = data.lag.tolerance(player.getPing(), currentTps(), lagLimits);
@@ -1021,7 +1052,7 @@
          }
          if (distance > max) {
              return flag(player, data, CheckId.BLOCKREACH, 1.0,
-@@ -1867,6 +2543,9 @@
+@@ -1867,6 +2559,9 @@
              }
  
              timerCheck(player, data, tick, now);
@@ -1031,7 +1062,7 @@
          }
          // Удаляем данные ушедших, даже если QuitEvent где-то потерялся.
          players.keySet().removeIf(uuid -> Bukkit.getPlayer(uuid) == null);
-@@ -2035,6 +2714,160 @@
+@@ -2035,6 +2730,160 @@
          return sender.hasPermission("voidanticheat.admin");
      }
  
@@ -1192,9 +1223,11 @@
      @Override
      public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
          if (!admin(sender)) {
-@@ -2047,9 +2880,35 @@
+@@ -2046,10 +2895,37 @@
+             case "reload" -> {
                  reloadConfig();
                  loadCheckSettings();
++                loadDrillSettings();
                  loadLagLimits();
 +                coreCombatByWorld.clear();
 +                if (antiEsp != null) {
@@ -1228,7 +1261,7 @@
              case "alerts" -> {
                  if (!(sender instanceof Player player)) {
                      sender.sendMessage(comp("&7Команда alerts доступна только игроку."));
-@@ -2064,18 +2923,39 @@
+@@ -2064,18 +2940,39 @@
                  return true;
              }
              case "info" -> {
@@ -1269,7 +1302,7 @@
                  tell(sender, "info-lag",
                          "{interval}", formatVl(data.lag.intervalMs()),
                          "{jitter}", formatVl(data.lag.deviationMs()),
-@@ -2106,7 +2986,11 @@
+@@ -2106,7 +3003,11 @@
                  return true;
              }
              case "reset" -> {
@@ -1282,7 +1315,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2128,7 +3012,11 @@
+@@ -2128,7 +3029,11 @@
                  return true;
              }
              case "setback" -> {
@@ -1295,7 +1328,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2142,11 +3030,22 @@
+@@ -2142,11 +3047,22 @@
                  return true;
              }
              case "help" -> {
@@ -1318,7 +1351,7 @@
                      sendHelp(sender);
                      return true;
                  }
-@@ -2163,41 +3062,150 @@
+@@ -2163,41 +3079,150 @@
      }
  
      private void sendHelp(CommandSender sender) {
@@ -1767,18 +1800,43 @@
    killaura-window-ms: 1000
    killaura-wall-min-distance: 1.90
    killaura-wall-max-ping: 320
-@@ -215,6 +318,10 @@
+@@ -215,6 +318,35 @@
  world:
    fastbreak-per-second: 28
    fastbreak-same-tick: 4
 +  # Бур VoidEnchants ломает 3x3/3x3x2 серверным расширением: такие разрушения
-+  # не считаются отдельными действиями игрока. Источник — ключ drill в PDC
-+  # инструмента (namespace voidenchants), подделать с клиента нельзя.
++  # не считаются отдельными действиями игрока. Источник — метка на предмете,
++  # подделать её с клиента нельзя. Подробности — в блоке drill-exempt ниже.
 +  fastbreak-server-multiblock-exempt: true
++  # --- Исключение для инструментов с серверным мультиблоком (бур) ---
++  #
++  # Любой такой инструмент создаёт 9–18 настоящих BlockBreakEvent за ОДИН тик
++  # от имени одного игрока — для проверок это неотличимо от Nuker. Поэтому по
++  # метке на предмете античит понимает, что блоки ломает серверное расширение,
++  # и не считает их ни FastBreak, ни AutoMine, ни BlockReach.
++  drill-exempt:
++    # Полный выключатель. false = любые мультиблоки считаются обычным ломанием.
++    enabled: true
++    # Пространства имён меток (PDC). Пустой список = ЛЮБОЕ пространство имён,
++    # и это правильный выбор: чар может жить в вашем плагине под любым именем.
++    # Если хотите строгость — перечислите, например: [voidenchants, voiditems]
++    namespaces: []
++    # Имена ключей. Пустой список = любой ключ. Рекомендуется оставить пустым,
++    # чтобы чар под другим именем не сломал исключение.
++    keys: []
++    # Запасной путь: имя предмета содержит подстроку (без учёта регистра и
++    # цветов). Нужен, если уровень чара хранится не в PDC. Пусто = выключено.
++    # Пример: ["Бур", "Drill"]
++    name-contains: []
++    # Потолок уровня из метки: защита от мусорных значений (9999).
++    max-level: 5
++    # Считать ли разрушения бура охотой за рудой (проверка AutoMine).
++    # false = бур по руде не даёт улик AutoMine.
++    exclude-from-automine: true
    fastplace-per-second: 28
    fastplace-same-tick: 4
    # Рука до блока: survival vanilla ~4.5, порог с Bedrock запасом.
-@@ -241,6 +348,49 @@
+@@ -241,6 +373,49 @@
    blue-ice-max-bps: 48.0
    burst-blocks: 3.0
  
@@ -1828,7 +1886,7 @@
  # Общие значения, если у конкретной проверки поле не задано.
  # buffer — сколько очков улик нужно, чтобы получить первый VL.
  # 2.5 при sample-gap 220 мс = примерно 3 устойчивых события.
-@@ -382,6 +532,27 @@
+@@ -382,6 +557,27 @@
      buffer: 2.0
      setback-vl: 12.0
      punish-vl: 20.0
@@ -1856,7 +1914,7 @@
  
  messages:
    prefix: "&#FF5555VoidAC &8» &f"
-@@ -389,7 +560,7 @@
+@@ -389,7 +585,7 @@
    alert-hover: "&7Игрок: &f{player}\n&7Проверка: &f{check}\n&7VL: &c{vl}&7/{max_vl}\n&7{details}\n&8Клик — /vac info"
    no-permission: "&cТолько для администрации."
    player-not-found: "&cИгрок не найден."
@@ -1865,7 +1923,7 @@
    reloaded: "&aVoidAntiCheat перезагружен."
    alerts-on: "&aАлерты VoidAntiCheat включены."
    alerts-off: "&cАлерты VoidAntiCheat выключены."
-@@ -400,14 +571,80 @@
+@@ -400,14 +596,80 @@
    state-on: "&#7CFC00включён"
    state-off: "&cвыключен"
    info-header: "&f{player} &7— Bedrock: &f{bedrock}&7, ввод: &f{input}&7, устройство: &f{device}&7, пинг: &f{ping}"
@@ -3121,6 +3179,233 @@
 +                + ": клиент заявляет мобильную платформу (" + profile.platform()
 +                + "), но управление мышиное и модель устройства пустая —"
 +                + " похоже на подмену DeviceOS настольным клиентом");
++    }
++}
+--- a/src/main/java/ru/voidpe/anticheat/ToolExempt.java
++++ b/src/main/java/ru/voidpe/anticheat/ToolExempt.java
+@@ -0,0 +1,224 @@
++package ru.voidpe.anticheat;
++
++import org.bukkit.NamespacedKey;
++import org.bukkit.inventory.ItemStack;
++import org.bukkit.persistence.PersistentDataContainer;
++import org.bukkit.persistence.PersistentDataType;
++
++import java.util.HashSet;
++import java.util.List;
++import java.util.Locale;
++import java.util.Set;
++
++/**
++ * Распознавание «инструментов с серверным мультиблоком» — бур, кирка-3x3 и
++ * подобные чары, которые ломают несколько блоков за одно действие игрока.
++ *
++ * <p><b>Зачем это нужно античиту.</b> Такой инструмент создаёт 9–18 настоящих
++ * {@code BlockBreakEvent} в одном тике от имени одного игрока. С точки зрения
++ * любой проверки на скорость это неотличимо от Nuker: тот тоже ломает много
++ * блоков сразу. Разница только в источнике — блоки ломает серверное расширение
++ * по метке на предмете, а не клиент по своей воле.</p>
++ *
++ * <p><b>Почему прежняя проверка не работала.</b> Она была жёстко привязана к
++ * двум пространствам имён ({@code voidenchants}, {@code voiditems}) и к типу
++ * {@code INTEGER}. Если чар называется иначе, лежит в другом плагине или хранит
++ * уровень строкой — исключение не срабатывало, и игрок получал ложные улики
++ * FastBreak/AutoMine. Теперь всё это настраивается в конфиге.</p>
++ *
++ * <p><b>Что именно читается.</b> Только метки на самом предмете
++ * ({@code PersistentDataContainer}). Клиент их подделать не может: PDC живёт
++ * на сервере и приходит в пакете только как обычный предмет. Поэтому
++ * «надеть» метку бура на алмазную кирку через чит-клиент невозможно.</p>
++ */
++final class ToolExempt {
++
++    /** Настройки исключения, читаются из {@code world.drill-exempt.*}. */
++    record Settings(
++            boolean enabled,
++            Set<String> namespaces,
++            Set<String> keys,
++            Set<String> nameContains,
++            int maxLevel,
++            boolean requireAnyValue
++    ) {
++        static Settings disabled() {
++            return new Settings(false, Set.of(), Set.of(), Set.of(), 0, false);
++        }
++
++        static Settings of(boolean enabled, List<String> namespaces, List<String> keys,
++                           List<String> nameContains, int maxLevel) {
++            return new Settings(enabled,
++                    normalize(namespaces),
++                    normalize(keys),
++                    normalize(nameContains),
++                    Math.max(0, maxLevel),
++                    true);
++        }
++
++        private static Set<String> normalize(List<String> values) {
++            Set<String> set = new HashSet<>();
++            if (values != null) {
++                for (String value : values) {
++                    if (value != null && !value.isBlank()) {
++                        set.add(value.trim().toLowerCase(Locale.ROOT));
++                    }
++                }
++            }
++            return set;
++        }
++
++        /** Пустой список пространств имён означает «любое». */
++        boolean namespaceAllowed(String namespace) {
++            return namespaces.isEmpty() || namespaces.contains(namespace.toLowerCase(Locale.ROOT));
++        }
++    }
++
++    /** Кэш на тик: у бура все события приходят подряд, читать PDC каждый раз незачем. */
++    private int cachedTick = Integer.MIN_VALUE;
++    private boolean cachedResult;
++
++    /**
++     * Ломает ли этот предмет несколько блоков за одно действие игрока.
++     *
++     * <p>Результат кэшируется на тик: у бура 9–18 событий за тик, и каждое
++     * чтение PDC — это копирование метаданных предмета.</p>
++     */
++    boolean multiBlockTool(ItemStack tool, Settings settings, int currentTick) {
++        if (settings == null || !settings.enabled()) {
++            return false;
++        }
++        if (cachedTick == currentTick) {
++            return cachedResult;
++        }
++        cachedTick = currentTick;
++        cachedResult = inspect(tool, settings);
++        return cachedResult;
++    }
++
++    /** Сброс кэша при смене предмета/тике — вызывается аккуратно, чтобы не протух. */
++    void invalidate() {
++        cachedTick = Integer.MIN_VALUE;
++    }
++
++    private boolean inspect(ItemStack tool, Settings settings) {
++        if (tool == null || tool.getType().isAir()) {
++            return false;
++        }
++        try {
++            if (!tool.hasItemMeta()) {
++                return byName(tool, settings);
++            }
++            var meta = tool.getItemMeta();
++            if (meta == null) {
++                return byName(tool, settings);
++            }
++            PersistentDataContainer pdc = meta.getPersistentDataContainer();
++            // Ключи предмета, а не всего мира: у бура их единицы.
++            for (NamespacedKey key : pdc.getKeys()) {
++                if (!settings.namespaceAllowed(key.getNamespace())) {
++                    continue;
++                }
++                if (!settings.keys().isEmpty()
++                        && !settings.keys().contains(key.getKey().toLowerCase(Locale.ROOT))) {
++                    continue;
++                }
++                if (hasPositiveValue(pdc, key, settings)) {
++                    return true;
++                }
++            }
++            return byName(tool, settings);
++        } catch (Throwable ignored) {
++            // Неизвестный предмет/реализация PDC — считаем обычным инструментом,
++            // проверки продолжают работать. Ошибка не должна отключать античит.
++            return false;
++        }
++    }
++
++    /**
++     * Уровень чара в PDC. Тип заранее неизвестен: разные плагины пишут
++     * {@code Integer}, {@code String} или {@code Byte}. Перебираем известные
++     * варианты, потому что {@code get} с неверным типом возвращает null.
++     */
++    private boolean hasPositiveValue(PersistentDataContainer pdc, NamespacedKey key, Settings settings) {
++        Integer integer = tryGet(pdc, key, PersistentDataType.INTEGER);
++        if (integer != null) {
++            return levelOk(integer, settings);
++        }
++        Byte bytes = tryGet(pdc, key, PersistentDataType.BYTE);
++        if (bytes != null) {
++            return levelOk(bytes.intValue(), settings);
++        }
++        Short shorts = tryGet(pdc, key, PersistentDataType.SHORT);
++        if (shorts != null) {
++            return levelOk(shorts.intValue(), settings);
++        }
++        Long longs = tryGet(pdc, key, PersistentDataType.LONG);
++        if (longs != null) {
++            return levelOk(longs.intValue(), settings);
++        }
++        String text = tryGet(pdc, key, PersistentDataType.STRING);
++        if (text != null) {
++            try {
++                return levelOk(Integer.parseInt(text.trim()), settings);
++            } catch (NumberFormatException notANumber) {
++                // Метка есть, но это не уровень (например, "true"). Если
++                // значение непустое — считаем инструментом с расширением:
++                // сам факт метки уже означает серверную механику.
++                return !text.isBlank();
++            }
++        }
++        // Метка есть, но значение другого типа — проверяем «есть ли вообще».
++        return settings.requireAnyValue() && pdc.has(key);
++    }
++
++    private static <T, Z> Z tryGet(PersistentDataContainer pdc, NamespacedKey key,
++                                   PersistentDataType<T, Z> type) {
++        try {
++            return pdc.get(key, type);
++        } catch (Throwable wrongType) {
++            return null;
++        }
++    }
++
++    private boolean levelOk(int level, Settings settings) {
++        if (level <= 0) {
++            return false;
++        }
++        // Потолок уровня: защита от мусорных меток вроде 9999.
++        return settings.maxLevel() == 0 || level <= settings.maxLevel();
++    }
++
++    /**
++     * Запасной путь: имя предмета содержит одну из подстрок, например
++     * «Бур» или «Drill». Нужен, если чар реализован без PDC — через
++     * переименование предмета. По умолчанию список пуст.
++     */
++    private boolean byName(ItemStack tool, Settings settings) {
++        if (settings.nameContains().isEmpty()) {
++            return false;
++        }
++        try {
++            if (!tool.hasItemMeta()) {
++                return false;
++            }
++            var meta = tool.getItemMeta();
++            if (meta == null || !meta.hasDisplayName()) {
++                return false;
++            }
++            String name = org.bukkit.ChatColor.stripColor(meta.getDisplayName());
++            if (name == null) {
++                return false;
++            }
++            String lower = name.toLowerCase(Locale.ROOT);
++            for (String needle : settings.nameContains()) {
++                if (lower.contains(needle)) {
++                    return true;
++                }
++            }
++        } catch (Throwable ignored) {
++            return false;
++        }
++        return false;
 +    }
 +}
 --- a/build.gradle.kts
