@@ -1209,6 +1209,15 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             return;
         }
 
+        // Шаг 1 внедрения предсказания движения: только измерение расхождения
+        // с ванильной физикой. Ничего не блокирует, улик не выдаёт, работает
+        // при выключенном enforcement. Стоимость — несколько double на пакет,
+        // чтений мира нет. См. PredictionProbe.
+        if (confBool("world.prediction.measure", true)) {
+            data.prediction.sample(player, event.getFrom(), to,
+                    data.lastOnGround, player.isOnGround(), tick);
+        }
+
         // Согласование со сторонними телепортами и коррекциями ядра.
         //
         // PlayerMoveEvent не всегда начинается там, где мы запомнили позицию:
@@ -2937,6 +2946,25 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                     alertsOff.add(player.getUniqueId());
                     tell(sender, "alerts-off");
                 }
+                return true;
+            }
+            case "predict" -> {
+                Player target;
+                if (args.length >= 2) {
+                    target = Bukkit.getPlayerExact(args[1]);
+                    if (target == null) {
+                        tell(sender, "player-not-found", "player", args[1]);
+                        return true;
+                    }
+                } else if (sender instanceof Player self) {
+                    target = self;
+                } else {
+                    tell(sender, "usage-predict", "");
+                    return true;
+                }
+                PlayerData d = data(target);
+                sender.sendMessage(prefix() + "§b" + target.getName());
+                sender.sendMessage(prefix() + d.prediction.describe());
                 return true;
             }
             case "info" -> {

@@ -224,6 +224,22 @@ def main() -> int:
     if "drill-exempt" not in src_text:
         fail("нет настройки world.drill-exempt — чар под другим именем сломает исключение")
 
+    # --- 4e. шаг 1 предсказания: только измерение, никаких коррекций ------
+    probe = ROOT / "VoidAntiCheat/src/main/java/ru/voidpe/anticheat/PredictionProbe.java"
+    checks += 1
+    if not probe.exists():
+        fail("нет PredictionProbe — шаг 1 предсказания не внедрён")
+
+    probe_text = probe.read_text(encoding="utf-8") if probe.exists() else ""
+    for forbidden in ("setCancelled", "teleport", "kick", "setTo", "flag("):
+        checks += 1
+        if forbidden in probe_text:
+            fail(f"PredictionProbe содержит '{forbidden}' — шаг 1 должен быть без коррекций")
+
+    checks += 1
+    if "0.08" not in probe_text or "0.98" not in probe_text:
+        fail("PredictionProbe не использует ванильные константы (0.08 / 0.98)")
+
     # --- 5. периодическая задача ничего не делает сама ----------------------
     sec_start, sec_end = body_of(lines, "private void secondTick(")
     sec_body = "\n".join(lines[sec_start: sec_end + 1])

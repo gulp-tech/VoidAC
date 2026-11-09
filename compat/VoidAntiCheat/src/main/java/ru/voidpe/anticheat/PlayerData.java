@@ -75,6 +75,8 @@ public final class PlayerData {
 
     // Вертикальное движение.
     public int airTicks;
+    /** Шаг 1 предсказания: только измерения, без единого флага. */
+    public final PredictionProbe prediction = new PredictionProbe();
     public int climbStreak;
     public int slowFallStreak;
     public int jesusTicks;
