@@ -1,0 +1,62 @@
+{
+  "format_version": [
+    1,
+    1,
+    0
+  ],
+  "stone": {
+    "sound": "stone",
+    "textures": "stone",
+    "render_method": "alpha_test"
+  },
+  "deepslate": {
+    "sound": "stone",
+    "textures": "deepslate",
+    "render_method": "alpha_test"
+  },
+  "dirt": {
+    "sound": "stone",
+    "textures": "dirt",
+    "render_method": "alpha_test"
+  },
+  "gravel": {
+    "sound": "stone",
+    "textures": "gravel",
+    "render_method": "alpha_test"
+  },
+  "andesite": {
+    "sound": "stone",
+    "textures": "andesite",
+    "render_method": "alpha_test"
+  },
+  "diorite": {
+    "sound": "stone",
+    "textures": "diorite",
+    "render_method": "alpha_test"
+  },
+  "granite": {
+    "sound": "stone",
+    "textures": "granite",
+    "render_method": "alpha_test"
+  },
+  "tuff": {
+    "sound": "stone",
+    "textures": "tuff",
+    "render_method": "alpha_test"
+  },
+  "calcite": {
+    "sound": "stone",
+    "textures": "calcite",
+    "render_method": "alpha_test"
+  },
+  "netherrack": {
+    "sound": "stone",
+    "textures": "netherrack",
+    "render_method": "alpha_test"
+  },
+  "cobblestone": {
+    "sound": "stone",
+    "textures": "cobblestone",
+    "render_method": "alpha_test"
+  }
+}

@@ -86,10 +86,4 @@ public final class TargetHistory {
                 (minX + maxX) / 2.0, (minY + maxY) / 2.0, (minZ + maxZ) / 2.0,
                 (maxX - minX) / 2.0, (maxY - minY) / 2.0, (maxZ - minZ) / 2.0);
     }
-
-    /** Время самого свежего сэмпла: по нему выбирается цель на вытеснение. */
-    public long newestTimeMillis() {
-        Sample last = samples.peekLast();
-        return last == null ? Long.MIN_VALUE : last.timeMillis();
-    }
 }
