@@ -1,0 +1,29 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "VoidAC Test — X-Ray",
+    "description": "Локальная проверка X-Ray. Только визуал, никаких чит-функций.",
+    "uuid": "c0b909cc-2bac-5c6a-b5ed-f9bf89d7e486",
+    "version": [
+      1,
+      0,
+      0
+    ],
+    "min_engine_version": [
+      1,
+      21,
+      0
+    ]
+  },
+  "modules": [
+    {
+      "type": "resources",
+      "uuid": "5613684f-0785-51b0-983f-6b2e5e6ec83d",
+      "version": [
+        1,
+        0,
+        0
+      ]
+    }
+  ]
+}
