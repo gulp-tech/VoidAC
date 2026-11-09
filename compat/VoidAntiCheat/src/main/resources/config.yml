@@ -614,6 +614,8 @@ messages:
   state-off: "&cвыключен"
   info-header: "&f{player} &7— Bedrock: &f{bedrock}&7, ввод: &f{input}&7, устройство: &f{device}&7, пинг: &f{ping}"
   info-input: "&7Ввод: &f{kind} &8• &7платформа &f{platform}&7, режим &f{raw_input}&7, модель &f{model} &8• &7UI &f{ui} &8• &7источник &f{source} &8• &7{verdict}"
+  predict-header: '&b{player} &7— предсказание движения'
+  usage-predict: '&7Использование: &f/vac predict [ник]'
   info-lag: "&7Сеть: интервал &f{interval}&7 мс, джиттер &f{jitter}&7 мс, допуск &f{tolerance}&7x"
   info-none: "&7Активных VL нет."
   info-line: "&7{check}: &c{vl}&7/{max_vl} &8(буфер {buffer})"

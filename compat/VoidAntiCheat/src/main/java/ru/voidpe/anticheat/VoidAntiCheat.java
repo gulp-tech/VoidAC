@@ -2956,8 +2956,9 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                     return true;
                 }
                 PlayerData d = data(target);
-                sender.sendMessage(prefix() + "§b" + target.getName());
-                sender.sendMessage(prefix() + d.prediction.describe());
+                String pref = getConfig().getString("messages.prefix", "");
+                tell(sender, "predict-header", "player", target.getName());
+                sender.sendMessage(comp(pref + d.prediction.describe()));
                 return true;
             }
             case "info" -> {
