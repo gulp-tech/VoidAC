@@ -192,6 +192,38 @@ def main() -> int:
     except ImportError:
         print("  (PyYAML нет — проверка ключей конфига пропущена)", file=sys.stderr)
 
+    # --- 4d. бур (серверный мультиблок) не должен давать улик -------------
+    # Регрессия, которая уже случалась: бур шлёт 9-18 настоящих BlockBreakEvent
+    # за тик, и проверки принимали это за Nuker.
+    src_text = SRC.read_text(encoding="utf-8")
+    break_body = src_text.split("public void onBlockBreak(BlockBreakEvent event) {", 1)[1]
+    break_body = break_body.split("public void onBlockPlace", 1)[0]
+
+    checks += 1
+    if "drillTool" not in break_body:
+        fail("onBlockBreak не определяет drillTool — бур снова будет флагаться")
+
+    checks += 1
+    if not _re.search(r"!drillTool && blockReachViolation", break_body):
+        fail("BlockReach не исключает бур: угловые блоки 3x3 дальше ванильного лимита")
+
+    checks += 1
+    if not _re.search(r"!drillTool && enforcementEnabled\(\)", break_body):
+        fail("аварийная отмена по счётчику не исключает бур — часть блоков вырежется")
+
+    checks += 1
+    if "serverMultiBlockBreak(player, data, tick)" not in break_body:
+        fail("onBlockBreak не использует общее исключение мультиблока")
+
+    checks += 1
+    if "exclude-from-automine" not in src_text:
+        fail("AutoMine не исключает разрушения бура")
+
+    # Исключение должно быть настраиваемым, а не хардкодом namespace.
+    checks += 1
+    if "drill-exempt" not in src_text:
+        fail("нет настройки world.drill-exempt — чар под другим именем сломает исключение")
+
     # --- 5. периодическая задача ничего не делает сама ----------------------
     sec_start, sec_end = body_of(lines, "private void secondTick(")
     sec_body = "\n".join(lines[sec_start: sec_end + 1])

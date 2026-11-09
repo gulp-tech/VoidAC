@@ -132,6 +132,8 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
     private BedrockCoreBridge coreBridge;
     private AntiEspManager antiEsp;
     private DeviceProbe deviceProbe;
+    private final ToolExempt toolExempt = new ToolExempt();
+    private ToolExempt.Settings drillSettings = ToolExempt.Settings.disabled();
     private RegionHook regions;
     private BukkitTask secondTask;
     private ExecutorService ioExecutor;
@@ -160,6 +162,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
     public void onEnable() {
         saveDefaultConfig();
         loadCheckSettings();
+        loadDrillSettings();
         loadLagLimits();
         // Реестры — единственное место, зависящее от версии API. Если в новой
         // версии сервера что-то переименовали, античит должен работать дальше
@@ -292,6 +295,21 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         soulSpeedEnchant = registryLookup(Registry.ENCHANTMENT, "soul_speed");
         depthStriderEnchant = registryLookup(Registry.ENCHANTMENT, "depth_strider");
         frostWalkerEnchant = registryLookup(Registry.ENCHANTMENT, "frost_walker");
+    }
+
+    /**
+     * Настройки исключения для инструментов с серверным мультиблоком (бур).
+     * Читаются из {@code world.drill-exempt.*}; при отсутствии ключей остаются
+     * безопасные значения, а само исключение включено.
+     */
+    private void loadDrillSettings() {
+        drillSettings = ToolExempt.Settings.of(
+                confBool("world.drill-exempt.enabled", true),
+                getConfig().getStringList("world.drill-exempt.namespaces"),
+                getConfig().getStringList("world.drill-exempt.keys"),
+                getConfig().getStringList("world.drill-exempt.name-contains"),
+                confInt("world.drill-exempt.max-level", 5));
+        toolExempt.invalidate();
     }
 
     private void loadCheckSettings() {
@@ -2096,17 +2114,21 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         data.lastBlockChangeMillis = now;
         // blockReachViolation() всегда фиксирует улику (это нужно и в режиме
         // наблюдения), а возвращает true только когда блок надо отменить.
-        if (blockReachViolation(player, data, event.getBlock()) && enforcementEnabled()) {
+        int tick = Bukkit.getCurrentTick();
+        // Бур ломает 3x3: центральный блок в пределах руки, а угловые лежат
+        // диагонально дальше ванильного лимита. Это серверная механика, а не
+        // дальний удар, поэтому BlockReach для такого инструмента не считается.
+        boolean drillTool = serverMultiBlockBreak(player, data, tick);
+        if (!drillTool && blockReachViolation(player, data, event.getBlock()) && enforcementEnabled()) {
             event.setCancelled(true);
             return;
         }
-        int tick = Bukkit.getCurrentTick();
         // Бур VoidEnchants (3x3 / 3x3x2) ломает блоки серверным расширением, а не
         // отдельными действиями игрока, поэтому FastBreak такие разрушения не
         // считает. Источник проверяется по факту: уровень чара лежит в PDC
         // инструмента (Namespace voidenchants, ключ drill) — клиент подделать его
         // не может. Отключается: world.fastbreak-server-multiblock-exempt.
-        if (serverMultiBlockBreak(player, data, tick)) {
+        if (drillTool) {
             return;
         }
         if (data.lastBreakTick == tick) {
@@ -2132,7 +2154,11 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                             : data.breaks.size() + " блоков/сек");
             // Аварийная отмена (> лимит + 2) раньше срабатывала всегда и
             // игнорировала enforcement — в режиме наблюдения это ломало бур.
-            if (enforcementEnabled() && (cancel || data.breaksThisTick > sameTickLimit + 2)) {
+            // Бур не отменяем никогда: его блоки — серверное расширение.
+            // Иначе при большом 3x3 счётчик перевалит за лимит+2 и вырежет
+            // часть блоков, хотя игрок ничего не нарушал.
+            if (!drillTool && enforcementEnabled()
+                    && (cancel || data.breaksThisTick > sameTickLimit + 2)) {
                 event.setCancelled(true);
             }
         }
@@ -2154,6 +2180,15 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
      * минимальное число блоков за окно — одиночная жила не улика.</p>
      */
     private void autoMineCheck(Player player, PlayerData data, Block block, long now) {
+        // Бур сносит 3x3 разом: за окно набирается «доля руды», которая к
+        // AutoMine не имеет отношения. Если на сервере разрешено ломать руду
+        // расширением, такие разрушения не считаются охотой за рудой.
+        if (confBool("world.drill-exempt.exclude-from-automine", true)
+                && drillSettings.enabled()
+                && toolExempt.multiBlockTool(player.getInventory().getItemInMainHand(),
+                        drillSettings, Bukkit.getCurrentTick())) {
+            return;
+        }
         Material type = block.getType();
         boolean ore = isOreMaterial(type);
         data.brokenBlocks.addLast(new PlayerData.BrokenBlock(now, type, ore));
@@ -2370,39 +2405,20 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
      * (Бур VoidEnchants I/II). Результат кэшируется на тик: копирование
      * метаданных предмета не нужно дёргать на каждый блок.
      */
+    /**
+     * Ломает ли текущий инструмент несколько блоков за одно действие сервера
+     * (бур VoidEnchants 3x3 / 3x3x2 и аналоги).
+     *
+     * <p>Определяется по метке на предмете через {@link ToolExempt}: раньше
+     * проверка была прибита к конкретным пространствам имён и типу значения,
+     * и на любом другом чаре не срабатывала — игрок получал ложные улики.</p>
+     */
     private boolean serverMultiBlockBreak(Player player, PlayerData data, int tick) {
         if (!confBool("world.fastbreak-server-multiblock-exempt", true)) {
             return false;
         }
-        if (data.multiBreakTickId == tick) {
-            return data.multiBreakTick;
-        }
-        data.multiBreakTickId = tick;
-        data.multiBreakTick = false;
-        try {
-            ItemStack tool = player.getInventory().getItemInMainHand();
-            if (tool == null || tool.getType().isAir() || !tool.hasItemMeta()) {
-                return false;
-            }
-            PersistentDataContainer pdc = tool.getItemMeta().getPersistentDataContainer();
-            for (NamespacedKey key : pdc.getKeys()) {
-                if (!"drill".equals(key.getKey())) {
-                    continue;
-                }
-                String namespace = key.getNamespace();
-                if (!"voidenchants".equals(namespace) && !"voiditems".equals(namespace)) {
-                    continue;
-                }
-                Integer level = pdc.get(key, PersistentDataType.INTEGER);
-                if (level != null && level > 0) {
-                    data.multiBreakTick = true;
-                    return true;
-                }
-            }
-        } catch (Throwable ignored) {
-            // Неизвестный предмет — считаем обычным разрушением, проверка работает.
-        }
-        return false;
+        ItemStack tool = player.getInventory().getItemInMainHand();
+        return toolExempt.multiBlockTool(tool, drillSettings, tick);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -2879,6 +2895,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             case "reload" -> {
                 reloadConfig();
                 loadCheckSettings();
+                loadDrillSettings();
                 loadLagLimits();
                 coreCombatByWorld.clear();
                 if (antiEsp != null) {
