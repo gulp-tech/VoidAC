@@ -255,6 +255,61 @@ def main() -> int:
     if 'world.prediction.measure' not in src_text:
         fail("нет ключа world.prediction.measure — статистику нельзя выключить")
 
+    # --- 4f. надёжность: кэши, утечки, ограничения ------------------------
+    # Кэш конфига обязан сбрасываться на reload, иначе изменение файла
+    # не применяется до перезапуска (на этом уже спотыкались).
+    checks += 1
+    if "confCache.clear()" not in src_text:
+        fail("кэш конфига не сбрасывается — /vac reload не применит scalars")
+
+    checks += 1
+    if "fastAttackCache = null" not in src_text:
+        fail("fastAttackCache не сбрасывается на reload — настройка игнорируется")
+
+    # Неограниченные очереди = OutOfMemoryError при медленном диске.
+    checks += 1
+    if "getQueue().size()" not in src_text:
+        fail("очередь лога нарушений не ограничена — риск OOM")
+
+    checks += 1
+    if "MAX_LOG_BYTES" not in src_text:
+        fail("файл нарушений не ограничен по размеру — вырастет бесконечно")
+
+    # Карта целей игрока должна быть ограничена.
+    pd_text = (ROOT / "VoidAntiCheat/src/main/java/ru/voidpe/anticheat/PlayerData.java").read_text(encoding="utf-8")
+    checks += 1
+    if "MAX_TARGETS" not in pd_text:
+        fail("targets не ограничен — в массовом PvP карта растёт без предела")
+
+    # --- 4g. AVG и история: инструмент стаффа, не наказание ----------------
+    susp = ROOT / "VoidAntiCheat/src/main/java/ru/voidpe/anticheat/SuspicionTracker.java"
+    checks += 1
+    if not susp.exists():
+        fail("нет SuspicionTracker — AVG и история не реализованы")
+
+    susp_text = susp.read_text(encoding="utf-8") if susp.exists() else ""
+    # AVG обязан быть ограничен по памяти: иначе за сутки вырастет в сотни МБ.
+    for marker, why in (("MAX_ENTRIES", "история на игрока не ограничена"),
+                        ("MAX_CACHED_PLAYERS", "число игроков в кэше не ограничено"),
+                        ("MAX_QUEUE", "очередь записи на диск не ограничена")):
+        checks += 1
+        if marker not in susp_text:
+            fail(f"{marker} отсутствует — {why}")
+
+    # AVG не должен участвовать в наказаниях.
+    for forbidden in ("kick(", "setCancelled", "setTo", "teleport", "ban("):
+        checks += 1
+        if forbidden in susp_text:
+            fail(f"SuspicionTracker содержит '{forbidden}' — AVG не должен наказывать")
+
+    checks += 1
+    if "sendActionBar" not in susp_text:
+        fail("метка AVG не выводится")
+
+    checks += 1
+    if "lastAvgLabelMillis" not in susp_text:
+        fail("метка AVG без троттлинга — пересборка каждый тик")
+
     # --- 5. периодическая задача ничего не делает сама ----------------------
     sec_start, sec_end = body_of(lines, "private void secondTick(")
     sec_body = "\n".join(lines[sec_start: sec_end + 1])

@@ -133,6 +133,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
     private AntiEspManager antiEsp;
     private DeviceProbe deviceProbe;
     private final ToolExempt toolExempt = new ToolExempt();
+    private SuspicionTracker suspicion;
     private ToolExempt.Settings drillSettings = ToolExempt.Settings.disabled();
     private RegionHook regions;
     private BukkitTask secondTask;
@@ -196,6 +197,8 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 confBool("anti-esp.hide-spectators", true),
                 confBool("anti-esp.hide-invisible", true),
                 confBool("anti-esp.only-if-core-inactive", true));
+        suspicion = new SuspicionTracker(this);
+        applySuspicionSettings();
         applyAdvancedAntiEsp();
         regions = new RegionHook(getLogger());
         ioExecutor = Executors.newSingleThreadExecutor(runnable -> {
@@ -302,6 +305,26 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
      * Читаются из {@code world.drill-exempt.*}; при отсутствии ключей остаются
      * безопасные значения, а само исключение включено.
      */
+    /** Настройки AVG-метки и истории из конфига. */
+    private void applySuspicionSettings() {
+        if (suspicion == null) {
+            return;
+        }
+        suspicion.configure(
+                confBool("suspicion.label-enabled", true),
+                confDouble("suspicion.label-threshold", 5.0));
+    }
+
+    /** Доступ для SuspicionTracker: настройки проверки (без него он не соберёт AVG). */
+    CheckSettings checkSettings(CheckId check) {
+        return setting(check);
+    }
+
+    /** Доступ для SuspicionTracker: настройка suspicion.* с кэшем. */
+    boolean confSuspicion(String path, boolean fallback) {
+        return confBool(path, fallback);
+    }
+
     private void loadDrillSettings() {
         drillSettings = ToolExempt.Settings.of(
                 confBool("world.drill-exempt.enabled", true),
@@ -314,6 +337,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
     }
 
     private void loadCheckSettings() {
+        confCache.clear();
         settings.clear();
         for (CheckId check : CheckId.values()) {
             settings.put(check, CheckSettings.load(getConfig(), check));
@@ -342,23 +366,66 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         return getConfig().getString(path, fallback);
     }
 
+    /**
+     * Кэш скалярных значений конфига.
+     *
+     * <p>Почему это важно: {@code onMove} выполняется на каждый пакет движения
+     * и вызывал {@code getConfig().getX()} до шести раз. {@code FileConfiguration}
+     * делает на каждый такой вызов разбор пути по точкам и поиск в
+     * {@code MemorySection} — на сервере с сотней игроков это десятки тысяч
+     * лишних разборов строк в секунду.</p>
+     *
+     * <p>Кэш сбрасывается при {@code /vac reload}. Значения, которые читаются
+     * редко (команды, сообщения), кэш не используют — там экономить нечего.</p>
+     */
+    private final Map<String, Object> confCache = new java.util.HashMap<>();
+
+    @SuppressWarnings("unchecked")
+    private <T> T confCached(String path, T fallback) {
+        Object cached = confCache.get(path);
+        if (cached != null) {
+            return (T) cached;
+        }
+        Object value;
+        if (fallback instanceof Boolean b) {
+            value = getConfig().getBoolean(path, b);
+        } else if (fallback instanceof Integer i) {
+            value = getConfig().getInt(path, i);
+        } else if (fallback instanceof Long l) {
+            value = getConfig().getLong(path, l);
+        } else if (fallback instanceof Double d) {
+            value = getConfig().getDouble(path, d);
+        } else if (fallback instanceof String str) {
+            value = getConfig().getString(path, str);
+        } else {
+            return fallback;
+        }
+        confCache.put(path, value);
+        return (T) value;
+    }
+
     private boolean confBool(String path, boolean fallback) {
-        return getConfig().getBoolean(path, fallback);
+        return confCached(path, fallback);
     }
 
     private int confInt(String path, int fallback) {
-        return getConfig().getInt(path, fallback);
+        return confCached(path, fallback);
     }
 
     private long confLong(String path, long fallback) {
-        return getConfig().getLong(path, fallback);
+        return confCached(path, fallback);
     }
 
     private double confDouble(String path, double fallback) {
-        return getConfig().getDouble(path, fallback);
+        return confCached(path, fallback);
     }
 
-    private Component comp(String legacy) {
+    /** Пакетный доступ для SuspicionTracker (метка AVG). */
+    Component compPublic(String legacy) {
+        return comp(legacy);
+    }
+
+    Component comp(String legacy) {
         return LegacyComponentSerializer.legacySection().deserialize(TextUtil.color(legacy))
                 .decoration(TextDecoration.ITALIC, false);
     }
@@ -676,6 +743,8 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         }
         players.remove(event.getPlayer().getUniqueId());
         alertsOff.remove(event.getPlayer().getUniqueId());
+        // История переживает выход — она про игрока, а не про сессию, и
+        // чистится только вручную (/vac history <ник> clear).
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
@@ -843,6 +912,11 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         data.lastViolationMillis = now;
 
         maybeAlert(player, data, check, cfg, state, details, now);
+        // История и суммарный AVG: нужны для /vac history и метки над головой.
+        // Внутри — только память и ограниченная очередь, без работы с диском.
+        if (suspicion != null) {
+            suspicion.record(data, check, vl, details);
+        }
 
         boolean enforcement = enforcementEnabled();
         long aboveSetback = cfg.setbackVl() > 0
@@ -1006,14 +1080,50 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         }
     }
 
+    /** Потолок файла нарушений: 16 МБ. Дальше переименовывается в .old. */
+    private static final long MAX_LOG_BYTES = 16L * 1024 * 1024;
+
+    /** Счётчик подряд идущих неудачных записей: после предела пишем в консоль. */
+    private int logWriteFailures;
+
+    /**
+     * Запись строки нарушений в файл.
+     *
+     * <p>Учтите: {@code Executors.newSingleThreadExecutor} держит
+     * <b>неограниченную</b> очередь. Раньше на каждый флаг создавалась задача,
+     * и если диск медленный или файл огромный, очередь росла быстрее, чем
+     * писалась, — строки оседали в памяти до OutOfMemoryError. Теперь при
+     * переполнении очереди строка отбрасывается и пишется в консоль, а файл
+     * ограничен по размеру и ротируется.</p>
+     */
     private void writeLogLine(String plainText) {
         if (ioExecutor == null || ioExecutor.isShutdown()) {
+            return;
+        }
+        java.util.concurrent.ThreadPoolExecutor pool =
+                ioExecutor instanceof java.util.concurrent.ThreadPoolExecutor tpe ? tpe : null;
+        if (pool != null && pool.getQueue().size() > 2000) {
+            // Лучше потерять строку лога, чем вырастить очередь до OOM.
+            if (logWriteFailures++ % 100 == 0) {
+                getLogger().warning("Очередь лога нарушений переполнена, строки отброшены: "
+                        + logWriteFailures);
+            }
             return;
         }
         String line = "[" + LocalDateTime.now().format(LOG_TIME) + "] " + plainText + System.lineSeparator();
         ioExecutor.execute(() -> {
             try {
                 File file = new File(getDataFolder(), "violations.log");
+                if (file.length() > MAX_LOG_BYTES) {
+                    File old = new File(getDataFolder(), "violations.log.old");
+                    if (old.exists() && !old.delete()) {
+                        // Не смогли удалить — просто дописываем, размер не критичен.
+                        getLogger().fine("Не удалось удалить старый лог нарушений");
+                    }
+                    if (!file.renameTo(old)) {
+                        getLogger().fine("Не удалось ротировать лог нарушений");
+                    }
+                }
                 Files.writeString(file.toPath(), line, StandardCharsets.UTF_8,
                         StandardOpenOption.CREATE, StandardOpenOption.APPEND);
             } catch (Throwable ignored) {
@@ -2560,6 +2670,11 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 data.targets.clear();
             }
 
+            // Метка AVG: только для стаффа, с троттлингом в трекере.
+            if (suspicion != null) {
+                suspicion.refreshLabel(data, player);
+            }
+
             timerCheck(player, data, tick, now);
             // Бот проверяется раз в секунду по накопленной очереди действий:
             // на каждое событие это было бы слишком дорого, а окно у него 30 с.
@@ -2896,6 +3011,12 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         switch (sub) {
             case "reload" -> {
                 reloadConfig();
+                // Кэши, вычисленные из конфига, обязательно сбрасываются:
+                // иначе settings.fast-attack-server менялся в файле, а плагин
+                // продолжал работать по старому значению до перезапуска.
+                confCache.clear();
+                fastAttackCache = null;
+                // Лимиты читаются из Config каждый раз — кэш не нужен.
                 loadCheckSettings();
                 loadDrillSettings();
                 loadLagLimits();
@@ -2938,6 +3059,70 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 } else {
                     alertsOff.add(player.getUniqueId());
                     tell(sender, "alerts-off");
+                }
+                return true;
+            }
+            case "history" -> {
+                if (args.length < 2) {
+                    tell(sender, "usage-history", "");
+                    return true;
+                }
+                if (args.length >= 3 && "clear".equalsIgnoreCase(args[2])) {
+                    org.bukkit.OfflinePlayer offline = Bukkit.getOfflinePlayerIfCached(args[1]);
+                    if (offline == null) {
+                        tell(sender, "player-not-found", "player", args[1]);
+                        return true;
+                    }
+                    if (suspicion != null) {
+                        suspicion.clear(offline.getUniqueId());
+                    }
+                    tell(sender, "history-cleared", "player", args[1]);
+                    return true;
+                }
+                Player target = Bukkit.getPlayerExact(args[1]);
+                if (target == null) {
+                    tell(sender, "player-not-found", "player", args[1]);
+                    return true;
+                }
+                if (suspicion == null) {
+                    tell(sender, "history-empty");
+                    return true;
+                }
+                PlayerData d = data(target);
+                sender.sendMessage(comp("&b" + target.getName() + " &7— история нарушений"));
+                sender.sendMessage(comp(String.format(Locale.ROOT,
+                        "&7AVG сейчас: &f%.1f&7, пик: &f%.1f", suspicion.avg(d), suspicion.peak(target.getUniqueId()))));
+                // Сводка по проверкам: сразу видно, на чём именно «горит».
+                for (Map.Entry<String, int[]> e : suspicion.summary(target.getUniqueId()).entrySet()) {
+                    sender.sendMessage(comp("  &f" + e.getKey() + " &7— &f"
+                            + e.getValue()[0] + "&7 раз, сумма VL &f" + e.getValue()[1]));
+                }
+                for (String line : suspicion.renderHistory(target).split("\n")) {
+                    sender.sendMessage(comp(line));
+                }
+                return true;
+            }
+            case "top" -> {
+                // Самые подозрительные сейчас: сортировка по AVG, только онлайн.
+                List<Player> online = new ArrayList<>(Bukkit.getOnlinePlayers());
+                online.sort((a, b) -> Double.compare(suspicion == null ? 0 : suspicion.avg(data(b)),
+                        suspicion == null ? 0 : suspicion.avg(data(a))));
+                sender.sendMessage(comp("&bТоп по AVG &7(сумма VL, максимум 10)"));
+                int shown = 0;
+                for (Player p : online) {
+                    if (shown >= 10) {
+                        break;
+                    }
+                    double avg = suspicion == null ? 0 : suspicion.avg(data(p));
+                    if (avg <= 0) {
+                        continue;
+                    }
+                    sender.sendMessage(comp(String.format(Locale.ROOT,
+                            "  &f%d. %s &7— AVG &f%.1f", shown + 1, p.getName(), avg)));
+                    shown++;
+                }
+                if (shown == 0) {
+                    sender.sendMessage(comp("  &7никого с ненулевым AVG"));
                 }
                 return true;
             }

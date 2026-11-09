@@ -75,6 +75,10 @@ public final class PlayerData {
 
     // Вертикальное движение.
     public int airTicks;
+    /** Суммарный VL, посчитанный последним (для метки и быстрых отчётов). */
+    public double lastAvg;
+    /** Троттлинг метки AVG: не чаще раза в секунду на игрока. */
+    public long lastAvgLabelMillis;
     public int climbStreak;
     public int slowFallStreak;
     public int jesusTicks;
@@ -208,9 +212,36 @@ public final class PlayerData {
         state(check).setVl(value);
     }
 
+    /**
+     * Лимит целей. Окно компенсации пинга — 8 сэмплов на цель, а чистка
+     * происходит раз в {@code secondTick} при 10 секундах тишины. Без лимита
+     * игрок в массовом PvP (арена, клановая война) успевал завести историю
+     * на каждого противника, и карта росла до конца боя. Пятнадцати целей
+     * хватает: одновременно бьют максимум нескольких.
+     */
+    private static final int MAX_TARGETS = 15;
+
     public TargetHistory history(UUID target) {
         TargetHistory history = targets.get(target);
         if (history == null) {
+            if (targets.size() >= MAX_TARGETS) {
+                // Освобождаем место: сбрасываем самую старую по времени сэмпла.
+                UUID oldest = null;
+                long oldestTime = Long.MAX_VALUE;
+                for (Map.Entry<UUID, TargetHistory> entry : targets.entrySet()) {
+                    long newest = entry.getValue().newestTimeMillis();
+                    if (newest < oldestTime) {
+                        oldestTime = newest;
+                        oldest = entry.getKey();
+                    }
+                }
+                if (oldest != null) {
+                    TargetHistory evicted = targets.remove(oldest);
+                    if (evicted != null) {
+                        evicted.clear();
+                    }
+                }
+            }
             history = new TargetHistory();
             targets.put(target, history);
         }
