@@ -224,21 +224,36 @@ def main() -> int:
     if "drill-exempt" not in src_text:
         fail("нет настройки world.drill-exempt — чар под другим именем сломает исключение")
 
-    # --- 4e. шаг 1 предсказания: только измерение, никаких коррекций ------
-    probe = ROOT / "VoidAntiCheat/src/main/java/ru/voidpe/anticheat/PredictionProbe.java"
+    # --- 4e. предсказание движения: модель и измерения -------------------
+    meter = ROOT / "VoidAntiCheat/src/main/java/ru/voidpe/anticheat/PredictionMeter.java"
     checks += 1
-    if not probe.exists():
-        fail("нет PredictionProbe — шаг 1 предсказания не внедрён")
+    if not meter.exists():
+        fail("нет PredictionMeter — предсказание движения отсутствует")
 
-    probe_text = probe.read_text(encoding="utf-8") if probe.exists() else ""
-    for forbidden in ("setCancelled", "teleport", "kick", "setTo", "flag("):
+    meter_text = meter.read_text(encoding="utf-8") if meter.exists() else ""
+    checks += 1
+    if "GRAVITY = 0.08" not in meter_text or "DRAG = 0.98" not in meter_text:
+        fail("PredictionMeter не использует ванильные константы (0.08 / 0.98)")
+
+    # Модель обязана стартовать с наблюдаемой скорости, а не с константы:
+    # у Geyser импульс прыжка отличается на несколько процентов.
+    checks += 1
+    if "expectedVy = dy" not in meter_text:
+        fail("PredictionMeter не стартует с фактической скорости — ложные на Bedrock")
+
+    # Измерения не должны ничего корректировать.
+    for forbidden in ("setCancelled", "teleport(", "kick(", "setTo", "flag("):
         checks += 1
-        if forbidden in probe_text:
-            fail(f"PredictionProbe содержит '{forbidden}' — шаг 1 должен быть без коррекций")
+        if forbidden in meter_text:
+            fail(f"PredictionMeter содержит '{forbidden}' — класс должен только измерять")
 
     checks += 1
-    if "0.08" not in probe_text or "0.98" not in probe_text:
-        fail("PredictionProbe не использует ванильные константы (0.08 / 0.98)")
+    if "describe()" not in meter_text or "medianAbs()" not in meter_text:
+        fail("PredictionMeter не умеет отчитываться — нельзя решать по цифрам")
+
+    checks += 1
+    if 'world.prediction.measure' not in src_text:
+        fail("нет ключа world.prediction.measure — статистику нельзя выключить")
 
     # --- 5. периодическая задача ничего не делает сама ----------------------
     sec_start, sec_end = body_of(lines, "private void secondTick(")

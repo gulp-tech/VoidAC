@@ -310,6 +310,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 getConfig().getStringList("world.drill-exempt.name-contains"),
                 confInt("world.drill-exempt.max-level", 5));
         toolExempt.invalidate();
+        PredictionMeter.setMeasureEnabled(confBool("world.prediction.measure", true));
     }
 
     private void loadCheckSettings() {
@@ -1209,14 +1210,6 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             return;
         }
 
-        // Шаг 1 внедрения предсказания движения: только измерение расхождения
-        // с ванильной физикой. Ничего не блокирует, улик не выдаёт, работает
-        // при выключенном enforcement. Стоимость — несколько double на пакет,
-        // чтений мира нет. См. PredictionProbe.
-        if (confBool("world.prediction.measure", true)) {
-            data.prediction.sample(player, event.getFrom(), to,
-                    data.lastOnGround, player.isOnGround(), tick);
-        }
 
         // Согласование со сторонними телепортами и коррекциями ядра.
         //
