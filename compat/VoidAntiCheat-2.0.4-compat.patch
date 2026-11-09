@@ -84,7 +84,7 @@
          if (registry == null) {
              return null;
          }
-@@ -264,6 +297,21 @@
+@@ -264,6 +297,22 @@
          frostWalkerEnchant = registryLookup(Registry.ENCHANTMENT, "frost_walker");
      }
  
@@ -101,12 +101,13 @@
 +                getConfig().getStringList("world.drill-exempt.name-contains"),
 +                confInt("world.drill-exempt.max-level", 5));
 +        toolExempt.invalidate();
++        PredictionMeter.setMeasureEnabled(confBool("world.prediction.measure", true));
 +    }
 +
      private void loadCheckSettings() {
          settings.clear();
          for (CheckId check : CheckId.values()) {
-@@ -289,6 +337,10 @@
+@@ -289,6 +338,10 @@
  
      // ------------------------------------------------------------ конфиг-хелперы
  
@@ -117,7 +118,7 @@
      private boolean confBool(String path, boolean fallback) {
          return getConfig().getBoolean(path, fallback);
      }
-@@ -326,10 +378,24 @@
+@@ -326,10 +379,24 @@
          } else {
              data.bedrock = confBool("settings.check-all-if-floodgate-missing", true);
          }
@@ -142,7 +143,7 @@
          data.profile = data.bedrock ? "bedrock" : "java";
          data.bypassAll = player.hasPermission("voidanticheat.bypass");
          data.excludedHere = isExcluded(player.getLocation());
-@@ -343,6 +409,118 @@
+@@ -343,6 +410,118 @@
          return data;
      }
  
@@ -261,7 +262,7 @@
      /** Только для тестов/диагностики: состояние без создания. */
      PlayerData peek(Player player) {
          return player == null ? null : players.get(player.getUniqueId());
-@@ -371,20 +549,109 @@
+@@ -371,20 +550,109 @@
          return mode == GameMode.SURVIVAL || mode == GameMode.ADVENTURE;
      }
  
@@ -375,7 +376,7 @@
      private boolean inGrace(PlayerData data) {
          return System.currentTimeMillis() < data.graceUntilMillis;
      }
-@@ -396,10 +663,16 @@
+@@ -396,10 +664,16 @@
      @EventHandler(priority = EventPriority.MONITOR)
      public void onJoin(PlayerJoinEvent event) {
          createData(event.getPlayer(), true);
@@ -392,7 +393,7 @@
          players.remove(event.getPlayer().getUniqueId());
          alertsOff.remove(event.getPlayer().getUniqueId());
      }
-@@ -410,6 +683,10 @@
+@@ -410,6 +684,10 @@
          if (event.getTo() != null) {
              grantGrace(data, confLong("settings.teleport-grace-ms", 1750L));
              data.resetMovement(event.getTo(), Bukkit.getCurrentTick(), System.nanoTime(), event.getPlayer().isOnGround());
@@ -403,7 +404,7 @@
              data.clearSustainAll();
              updateSafeLocation(event.getPlayer(), event.getTo(), data);
          }
-@@ -420,6 +697,7 @@
+@@ -420,6 +698,7 @@
          PlayerData data = data(event.getPlayer());
          grantGrace(data, confLong("settings.respawn-grace-ms", 3500L));
          data.resetMovement(event.getRespawnLocation(), Bukkit.getCurrentTick(), System.nanoTime(), true);
@@ -411,7 +412,7 @@
          data.safeLocation = event.getRespawnLocation().clone();
          data.clearSustainAll();
      }
-@@ -430,6 +708,7 @@
+@@ -430,6 +709,7 @@
          grantGrace(data, confLong("settings.world-change-grace-ms", 2500L));
          data.resetMovement(event.getPlayer().getLocation(), Bukkit.getCurrentTick(), System.nanoTime(),
                  event.getPlayer().isOnGround());
@@ -419,7 +420,7 @@
          data.clearSustainAll();
      }
  
-@@ -564,7 +843,7 @@
+@@ -564,7 +844,7 @@
  
          maybeAlert(player, data, check, cfg, state, details, now);
  
@@ -428,7 +429,7 @@
          long aboveSetback = cfg.setbackVl() > 0
                  ? state.aboveForMillis(VL_SUSTAIN_SETBACK, cfg.setbackVl(), now) : 0L;
          long aboveCancel = cfg.cancelVl() > 0
-@@ -774,11 +1053,19 @@
+@@ -774,11 +1054,19 @@
      }
  
      /** VoidPvP (или другой плагин без кд атаки) делает высокий CPS легальным. */
@@ -450,7 +451,7 @@
              if (fastAttackCache) {
                  getLogger().info("Обнаружен режим без кд атаки: сырой CPS не считается автокликером, "
                          + "проверяется только ровность интервалов.");
-@@ -787,6 +1074,49 @@
+@@ -787,6 +1075,49 @@
          return fastAttackCache;
      }
  
@@ -500,7 +501,7 @@
      private double currentTps() {
          double[] tps = Bukkit.getTPS();
          return tps.length == 0 ? 20.0 : Math.min(20.0, tps[0]);
-@@ -866,7 +1196,7 @@
+@@ -866,7 +1197,7 @@
                  || to.getPitch() < -90.5f || to.getPitch() > 90.5f
                  || to.getYaw() < -100_000f || to.getYaw() > 100_000f) {
              flag(player, data, CheckId.BADPACKETS, 2.0, "невозможные координаты/углы");
@@ -509,10 +510,11 @@
                  event.setTo(event.getFrom().clone());
              }
              data.resetMovement(event.getFrom(), tick, nowNanos, player.isOnGround());
-@@ -879,6 +1209,32 @@
+@@ -879,6 +1210,33 @@
              return;
          }
  
++
 +        // Согласование со сторонними телепортами и коррекциями ядра.
 +        //
 +        // PlayerMoveEvent не всегда начинается там, где мы запомнили позицию:
@@ -542,7 +544,7 @@
          double dx = to.getX() - data.lastX;
          double dy = to.getY() - data.lastY;
          double dz = to.getZ() - data.lastZ;
-@@ -903,8 +1259,13 @@
+@@ -903,8 +1261,13 @@
          if ((horizontal > teleportDelta || Math.abs(dy) > teleportDelta) && !inGrace(data)) {
              flag(player, data, CheckId.BADPACKETS, 2.0,
                      "скачок позиции " + formatVl(Math.max(horizontal, Math.abs(dy))) + " бл.");
@@ -558,7 +560,7 @@
              return;
          }
  
-@@ -952,7 +1313,10 @@
+@@ -952,7 +1315,10 @@
              noclipCheck(player, data, to, env, nowMillis);
          }
  
@@ -570,7 +572,7 @@
              Location safe = safeOr(data, to);
              event.setTo(safe);
              data.resetMovement(safe, tick, nowNanos, true);
-@@ -1494,7 +1858,7 @@
+@@ -1494,7 +1860,7 @@
          ReachVerdict verdict = measureReach(attacker, data, target, now);
          if (verdict.hard()) {
              flag(attacker, data, CheckId.REACH, 2.0, verdict.details());
@@ -579,7 +581,7 @@
                  event.setCancelled(true);
              }
          } else if (verdict.distance() > verdict.limit()) {
-@@ -1510,20 +1874,43 @@
+@@ -1510,20 +1876,43 @@
       * Двусторонняя компенсация: минимальная дистанция по истории хитбокса
       * цели за окно пинга + допуск от скорости цели, джиттера и тач-ввода.
       */
@@ -625,7 +627,7 @@
                  ? confDouble("combat.reach-touch-max-blocks", 3.65)
                  : confDouble("combat.reach-max-blocks", 3.45);
          if (data.bedrock) {
-@@ -1534,7 +1921,7 @@
+@@ -1534,7 +1923,7 @@
              limit = Math.max(limit, interaction + 0.42);
          }
          double pingComp = Math.min(confDouble("combat.reach-ping-comp-max-blocks", 0.45),
@@ -634,7 +636,7 @@
                          * confDouble("combat.reach-ping-comp-per-100ms", 0.045));
          limit += pingComp;
          Vector targetVelocity = target.getVelocity();
-@@ -1543,7 +1930,7 @@
+@@ -1543,7 +1932,7 @@
          limit += Math.min(confDouble("combat.reach-move-comp-max-blocks", 0.35),
                  targetBps * confDouble("combat.reach-move-comp-per-bps", 0.02));
          double tolerance = Math.min(confDouble("combat.reach-max-tolerance", 1.30),
@@ -643,7 +645,7 @@
          limit *= tolerance;
  
          double hard = confDouble("combat.reach-hard-cancel-blocks", 4.80) * Math.min(1.15, tolerance);
-@@ -1574,14 +1961,28 @@
+@@ -1574,14 +1963,28 @@
          }
          long now = System.currentTimeMillis();
          recordAttack(data, target, now);
@@ -675,7 +677,7 @@
              flag(attacker, data, CheckId.KILLAURA, 1.0, distinct + " разных целей за 1 сек.");
              data.attacks.clear();
          }
-@@ -1645,11 +2046,11 @@
+@@ -1645,11 +2048,11 @@
                  lastSecond++;
              }
          }
@@ -689,7 +691,7 @@
          int maxCps = touch
                  ? confInt("combat.autoclicker-touch-cps", 27)
                  : confInt("combat.autoclicker-cps", 24);
-@@ -1711,17 +2112,35 @@
+@@ -1711,17 +2114,35 @@
          }
          long now = System.currentTimeMillis();
          data.lastBlockChangeMillis = now;
@@ -727,7 +729,7 @@
          data.breaks.addLast(now);
          pruneWindow(data.breaks, now, 1000L, 80);
          int sameTickLimit = confInt("world.fastbreak-same-tick", 4);
-@@ -1733,12 +2152,275 @@
+@@ -1733,12 +2154,275 @@
                      data.breaksThisTick >= sameTickLimit
                              ? data.breaksThisTick + " блоков за тик"
                              : data.breaks.size() + " блоков/сек");
@@ -1004,7 +1006,7 @@
      @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
      public void onBlockPlace(BlockPlaceEvent event) {
          Player player = event.getPlayer();
-@@ -1748,7 +2430,7 @@
+@@ -1748,7 +2432,7 @@
          }
          long now = System.currentTimeMillis();
          data.lastBlockChangeMillis = now;
@@ -1013,7 +1015,7 @@
              event.setCancelled(true);
              return;
          }
-@@ -1770,11 +2452,13 @@
+@@ -1770,11 +2454,13 @@
                      data.placesThisTick >= sameTickLimit
                              ? data.placesThisTick + " блоков за тик"
                              : data.places.size() + " блоков/сек");
@@ -1028,7 +1030,7 @@
          scaffoldCheck(player, data, event, now);
      }
  
-@@ -1782,12 +2466,20 @@
+@@ -1782,12 +2468,20 @@
          Location center = block.getLocation().add(0.5, 0.5, 0.5);
          double distance = player.getEyeLocation().distance(center);
          double tolerance = data.lag.tolerance(player.getPing(), currentTps(), lagLimits);
@@ -1052,7 +1054,7 @@
          }
          if (distance > max) {
              return flag(player, data, CheckId.BLOCKREACH, 1.0,
-@@ -1867,6 +2559,9 @@
+@@ -1867,6 +2561,9 @@
              }
  
              timerCheck(player, data, tick, now);
@@ -1062,7 +1064,7 @@
          }
          // Удаляем данные ушедших, даже если QuitEvent где-то потерялся.
          players.keySet().removeIf(uuid -> Bukkit.getPlayer(uuid) == null);
-@@ -2035,6 +2730,160 @@
+@@ -2035,6 +2732,160 @@
          return sender.hasPermission("voidanticheat.admin");
      }
  
@@ -1223,7 +1225,7 @@
      @Override
      public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
          if (!admin(sender)) {
-@@ -2046,10 +2895,37 @@
+@@ -2046,10 +2897,37 @@
              case "reload" -> {
                  reloadConfig();
                  loadCheckSettings();
@@ -1261,9 +1263,30 @@
              case "alerts" -> {
                  if (!(sender instanceof Player player)) {
                      sender.sendMessage(comp("&7Команда alerts доступна только игроку."));
-@@ -2064,18 +2940,39 @@
+@@ -2063,19 +2941,60 @@
+                 }
                  return true;
              }
++            case "predict" -> {
++                Player target;
++                if (args.length >= 2) {
++                    target = Bukkit.getPlayerExact(args[1]);
++                    if (target == null) {
++                        tell(sender, "player-not-found", "player", args[1]);
++                        return true;
++                    }
++                } else if (sender instanceof Player self) {
++                    target = self;
++                } else {
++                    tell(sender, "usage-predict", "");
++                    return true;
++                }
++                PlayerData d = data(target);
++                String pref = getConfig().getString("messages.prefix", "");
++                tell(sender, "predict-header", "player", target.getName());
++                sender.sendMessage(comp(pref + d.prediction.describe()));
++                return true;
++            }
              case "info" -> {
 -                Player target = args.length >= 2 ? Bukkit.getPlayerExact(args[1]) : null;
 +                if (args.length < 2) {
@@ -1302,7 +1325,7 @@
                  tell(sender, "info-lag",
                          "{interval}", formatVl(data.lag.intervalMs()),
                          "{jitter}", formatVl(data.lag.deviationMs()),
-@@ -2106,7 +3003,11 @@
+@@ -2106,7 +3025,11 @@
                  return true;
              }
              case "reset" -> {
@@ -1315,7 +1338,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2128,7 +3029,11 @@
+@@ -2128,7 +3051,11 @@
                  return true;
              }
              case "setback" -> {
@@ -1328,7 +1351,7 @@
                  if (target == null) {
                      tell(sender, "player-not-found");
                      return true;
-@@ -2142,11 +3047,22 @@
+@@ -2142,11 +3069,22 @@
                  return true;
              }
              case "help" -> {
@@ -1351,7 +1374,7 @@
                      sendHelp(sender);
                      return true;
                  }
-@@ -2163,41 +3079,150 @@
+@@ -2163,41 +3101,150 @@
      }
  
      private void sendHelp(CommandSender sender) {
@@ -1800,7 +1823,7 @@
    killaura-window-ms: 1000
    killaura-wall-min-distance: 1.90
    killaura-wall-max-ping: 320
-@@ -215,6 +318,35 @@
+@@ -215,6 +318,52 @@
  world:
    fastbreak-per-second: 28
    fastbreak-same-tick: 4
@@ -1808,6 +1831,23 @@
 +  # не считаются отдельными действиями игрока. Источник — метка на предмете,
 +  # подделать её с клиента нельзя. Подробности — в блоке drill-exempt ниже.
 +  fastbreak-server-multiblock-exempt: true
++  # --- Предсказание движения: измерения ---
++  #
++  # В античите уже есть предсказание вертикальной физики (PredictionMeter):
++  # модель v.y = (v.y - 0.08) * 0.98, те же константы, что в ванилле и в Boar.
++  # Оно ловит два физически невозможных случая: набор >2.2 блоков высоты в
++  # воздухе и «висение» без опоры. Всё остальное поглощается допуском, чтобы
++  # не наказывать телефоны и Bedrock-прыжки.
++  #
++  # Смотрите цифры перед тем, как ужесточать: /vac predict <ник> показывает
++  # реальное расхождение на ЭТОМ сервере (медиана, максимум, доля > 0.01 бл).
++  # Ориентир: медиана <= 0.002 — физика верна; > 0.02 — ужесточать нельзя.
++  # Для справки: Boar (MIT) работает с допуском 0.0001 блока и сам признаёт,
++  # что не справляется с расхождением меньше 5.0E-5.
++  prediction:
++    # Собирать статистику расхождений. Стоимость — несколько double на тик,
++    # без чтений мира. Ничего не блокирует и не наказывает.
++    measure: true
 +  # --- Исключение для инструментов с серверным мультиблоком (бур) ---
 +  #
 +  # Любой такой инструмент создаёт 9–18 настоящих BlockBreakEvent за ОДИН тик
@@ -1836,7 +1876,7 @@
    fastplace-per-second: 28
    fastplace-same-tick: 4
    # Рука до блока: survival vanilla ~4.5, порог с Bedrock запасом.
-@@ -241,6 +373,49 @@
+@@ -241,6 +390,49 @@
    blue-ice-max-bps: 48.0
    burst-blocks: 3.0
  
@@ -1886,7 +1926,7 @@
  # Общие значения, если у конкретной проверки поле не задано.
  # buffer — сколько очков улик нужно, чтобы получить первый VL.
  # 2.5 при sample-gap 220 мс = примерно 3 устойчивых события.
-@@ -382,6 +557,27 @@
+@@ -382,6 +574,27 @@
      buffer: 2.0
      setback-vl: 12.0
      punish-vl: 20.0
@@ -1914,7 +1954,7 @@
  
  messages:
    prefix: "&#FF5555VoidAC &8» &f"
-@@ -389,7 +585,7 @@
+@@ -389,7 +602,7 @@
    alert-hover: "&7Игрок: &f{player}\n&7Проверка: &f{check}\n&7VL: &c{vl}&7/{max_vl}\n&7{details}\n&8Клик — /vac info"
    no-permission: "&cТолько для администрации."
    player-not-found: "&cИгрок не найден."
@@ -1923,11 +1963,13 @@
    reloaded: "&aVoidAntiCheat перезагружен."
    alerts-on: "&aАлерты VoidAntiCheat включены."
    alerts-off: "&cАлерты VoidAntiCheat выключены."
-@@ -400,14 +596,80 @@
+@@ -400,14 +613,82 @@
    state-on: "&#7CFC00включён"
    state-off: "&cвыключен"
    info-header: "&f{player} &7— Bedrock: &f{bedrock}&7, ввод: &f{input}&7, устройство: &f{device}&7, пинг: &f{ping}"
 +  info-input: "&7Ввод: &f{kind} &8• &7платформа &f{platform}&7, режим &f{raw_input}&7, модель &f{model} &8• &7UI &f{ui} &8• &7источник &f{source} &8• &7{verdict}"
++  predict-header: '&b{player} &7— предсказание движения'
++  usage-predict: '&7Использование: &f/vac predict [ник]'
    info-lag: "&7Сеть: интервал &f{interval}&7 мс, джиттер &f{jitter}&7 мс, допуск &f{tolerance}&7x"
    info-none: "&7Активных VL нет."
    info-line: "&7{check}: &c{vl}&7/{max_vl} &8(буфер {buffer})"
@@ -3406,6 +3448,218 @@
 +            return false;
 +        }
 +        return false;
++    }
++}
+--- a/src/main/java/ru/voidpe/anticheat/PredictionMeter.java
++++ b/src/main/java/ru/voidpe/anticheat/PredictionMeter.java
+@@ -0,0 +1,209 @@
++package ru.voidpe.anticheat;
++
++/**
++ * Мини-предсказание вертикальной физики (Grim-подобный подход, но без пакетов).
++ *
++ * <p>Модель ванильная: после отрыва от земли скорость уменьшается на 0.08 и
++ * умножается на 0.98 за тик. Сравниваем с фактическим dy, накопленным за
++ * {@code tickDelta} тиков. Наказываем только за две физически невозможные
++ * картины:</p>
++ *
++ * <ul>
++ *   <li><b>impossible</b> — игрок в воздухе набрал больше 3 блоков высоты с
++ *       постоянным отклонением от модели (прыжок даёт 1.25, Jump Boost II —
++ *       около 2.6, поэтому порог 3.0 оставляет запас);</li>
++ *   <li><b>hover</b> — больше 2 секунд «висит» без вертикального движения и
++ *       без опоры под ногами.</li>
++ * </ul>
++ *
++ * <p>Всё остальное (лаг, пачки пакетов, спринт-прыжки Bedrock) модель
++ * поглощает: она стартует с наблюдаемой скорости прыжка, а не с константы,
++ * поэтому не зависит от того, как Geyser пересчитал импульс.</p>
++ */
++public final class PredictionMeter {
++
++    private static final double GRAVITY = 0.08;
++    private static final double DRAG = 0.98;
++
++    /** Результат одного тика наблюдения. */
++    public record Verdict(boolean impossibleAscent, boolean hover, double ascent, double offset, int airTicks) {
++        public static final Verdict NONE = new Verdict(false, false, 0.0, 0.0, 0);
++    }
++
++    // --- Статистика измерений (шаг 1 внедрения предсказания) ---
++    // Нужна, чтобы решать по цифрам, а не по обещаниям: насколько сильное
++    // расхождение реально дают телефоны, прокси и Geyser на этом сервере.
++    private int statSamples;
++    private double statSumAbs;
++    private double statMaxAbs;
++    private final int[] statBuckets = new int[BUCKETS];
++
++    private static final int BUCKETS = 21;
++
++    /** Выключатель статистики из конфига ({@code world.prediction.measure}). */
++    private static volatile boolean measureEnabled = true;
++
++    public static void setMeasureEnabled(boolean enabled) {
++        measureEnabled = enabled;
++    }
++
++    private double expectedVy;
++    private double offsetEma;
++    private double ascent;
++    private int airTicks;
++    private int hoverCounter;
++    private boolean initialized;
++
++    /** Сброс при приземлении, телепорте, смене мира, посадке в транспорт. */
++    public void reset() {
++        expectedVy = 0.0;
++        offsetEma = 0.0;
++        ascent = 0.0;
++        airTicks = 0;
++        hoverCounter = 0;
++        initialized = false;
++    }
++
++    public int airTicks() {
++        return airTicks;
++    }
++
++    public double offset() {
++        return offsetEma;
++    }
++
++    /**
++     * @param dy            вертикальное смещение за сэмпл (может охватывать несколько тиков)
++     * @param tickDelta     сколько серверных тиков прошло
++     * @param leftGround    игрок только что оторвался от земли
++     */
++    public Verdict tick(double dy, int tickDelta, boolean leftGround) {
++        return tick(dy, tickDelta, leftGround, 3.0, 40);
++    }
++
++    /**
++     * @param ascentLimit  сколько блоков подряд можно набрать в воздухе
++     * @param hoverTicks   сколько тиков «висения» считаем невозможными
++     */
++    public Verdict tick(double dy, int tickDelta, boolean leftGround, double ascentLimit, int hoverTicks) {
++        int ticks = Math.max(1, tickDelta);
++        if (leftGround || !initialized) {
++            // Стартуем с фактической скорости: у Geyser импульс прыжка может
++            // отличаться от ванильного на несколько процентов — это не чит.
++            expectedVy = dy;
++            initialized = true;
++            airTicks = 0;
++            ascent = 0.0;
++            hoverCounter = 0;
++            offsetEma = 0.0;
++        }
++        for (int i = 0; i < ticks; i++) {
++            expectedVy = (expectedVy - GRAVITY) * DRAG;
++        }
++        double deviation = dy - expectedVy;
++        recordStat(Math.abs(deviation));
++        offsetEma += (Math.max(-2.0, Math.min(2.0, deviation)) - offsetEma) * 0.35;
++        airTicks += ticks;
++        if (dy > 0.004) {
++            ascent += dy;
++        }
++        if (Math.abs(dy) < 0.035) {
++            hoverCounter += ticks;
++        } else {
++            hoverCounter = 0;
++        }
++        boolean impossible = ascent > Math.max(2.20, ascentLimit) && offsetEma > 0.12 && airTicks > 24;
++        boolean hover = hoverCounter > Math.max(20, hoverTicks) && airTicks > 40 && offsetEma > 0.06;
++        return new Verdict(impossible, hover, ascent, offsetEma, airTicks);
++    }
++
++    // ---------------------------------------------------------------
++    // Шаг 1: измерения. Ничего не решают, только собирают статистику.
++    // ---------------------------------------------------------------
++
++    private void recordStat(double offset) {
++        // Всё, что больше 4 блоков за тик, — не расхождение физики, а
++        // телепорт или рассинхрон. Такие выборки не портят статистику.
++        if (!measureEnabled || !Double.isFinite(offset) || offset > 4.0) {
++            return;
++        }
++        statSamples++;
++        statSumAbs += offset;
++        statMaxAbs = Math.max(statMaxAbs, offset);
++        int bucket = Math.min(BUCKETS - 1, (int) Math.round(offset * 100.0));
++        statBuckets[Math.max(0, bucket)]++;
++    }
++
++    public int samples() {
++        return statSamples;
++    }
++
++    /** Медиана абсолютного расхождения в блоках (по гистограмме). */
++    public double medianAbs() {
++        if (statSamples == 0) {
++            return 0.0;
++        }
++        int half = statSamples / 2;
++        int acc = 0;
++        for (int i = 0; i < BUCKETS; i++) {
++            acc += statBuckets[i];
++            if (acc >= half) {
++                return i / 100.0;
++            }
++        }
++        return (BUCKETS - 1) / 100.0;
++    }
++
++    public double meanAbs() {
++        return statSamples == 0 ? 0.0 : statSumAbs / statSamples;
++    }
++
++    public double maxAbs() {
++        return statMaxAbs;
++    }
++
++    /** Доля выборок с расхождением больше порога (в блоках). */
++    public double shareAbove(double threshold) {
++        if (statSamples == 0) {
++            return 0.0;
++        }
++        int limit = Math.min(BUCKETS, (int) Math.ceil(threshold * 100.0));
++        int above = 0;
++        for (int i = limit; i < BUCKETS; i++) {
++            above += statBuckets[i];
++        }
++        return (double) above / statSamples;
++    }
++
++    public void resetStats() {
++        statSamples = 0;
++        statSumAbs = 0;
++        statMaxAbs = 0;
++        java.util.Arrays.fill(statBuckets, 0);
++    }
++
++    /**
++     * Отчёт по-русски. Явно говорит, когда выборок мало: иной раз «0.0000»
++     * читают как успех, хотя это просто отсутствие данных.
++     */
++    public String describe() {
++        if (statSamples == 0) {
++            return "\u00a77предсказание: \u00a7cнет данных\u00a77 (игрок не был в свободном падении)";
++        }
++        double median = medianAbs();
++        String verdict;
++        if (statSamples < 100) {
++            verdict = "\u00a7eмало выборок — вывод делать рано (нужно 10-15 минут игры)";
++        } else if (median <= 0.002) {
++            verdict = "\u00a7aфизика совпадает с ванильной — можно снижать допуск";
++        } else if (median <= 0.02) {
++            verdict = "\u00a7eумеренное расхождение — предсказание годно, но нужен допуск";
++        } else {
++            verdict = "\u00a7cбольшое расхождение — в чистом виде не годится";
++        }
++        return String.format(java.util.Locale.ROOT,
++                "\u00a77предсказание: выборок \u00a7f%d\u00a77, медиана \u00a7f%.4f\u00a77, "
++                        + "среднее \u00a7f%.4f\u00a77, максимум \u00a7f%.4f\u00a77, >0.01 бл: \u00a7f%.1f%%\u00a77 — %s",
++                statSamples, median, meanAbs(), maxAbs(), shareAbove(0.01) * 100.0, verdict);
 +    }
 +}
 --- a/build.gradle.kts
