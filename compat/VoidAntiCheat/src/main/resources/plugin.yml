@@ -7,10 +7,13 @@ description: "Bedrock-only античит VoidPE 2.0: буферы улик, к�
 softdepend: [Floodgate, Geyser-Spigot, WorldGuard]
 commands:
   vac:
-    description: "VoidAntiCheat: статус, алерты, VL игрока, сброс, setback, проверки, миры, reload"
+    description: "VoidAntiCheat: статус, алерты, VL, история и AVG, проверки, миры, reload"
     usage: |
       /vac — статус античита
       /vac info <игрок> — VL, сеть, устройство и ввод игрока
+      /vac history <игрок> [clear] — история нарушений, AVG и пик
+      /vac top — топ онлайн по AVG
+      /vac predict <игрок> — реальное расхождение с физикой
       /vac alerts — вкл/выкл алерты себе
       /vac reset <игрок> [проверка] — сбросить VL
       /vac setback <игрок> — вернуть на безопасную точку
