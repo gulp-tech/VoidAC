@@ -351,15 +351,14 @@ jobs:
             (cd dist && sha256sum VoidAntiCheat-2.0.4.jar > VoidAntiCheat-2.0.4.jar.sha256)
           echo "dist/: $(ls -l dist/ | tail -n +2 | awk '{print $5, $9}' | tr '\n' ' ')"
 
-      - name: Коммит JAR в dist/ (только при ручном запуске)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Коммит JAR в dist/
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add dist/
           git diff --cached --quiet && { echo "dist/ не изменился"; exit 0; }
-          git commit -m "CI: JAR в dist/ ($(stat -c%s dist/VoidAntiCheat-2.0.4.jar) байт)"
+          git commit -m "CI: JAR в dist/ ($(stat -c%s dist/VoidAntiCheat-2.0.4.jar) байт) [skip ci]"
           git push
 
       - name: Publish to release
