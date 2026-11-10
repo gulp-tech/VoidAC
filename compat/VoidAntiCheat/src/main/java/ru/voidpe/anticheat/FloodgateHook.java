@@ -19,9 +19,52 @@ public final class FloodgateHook {
     private Method isFloodgatePlayer;
     private Method getPlayer;
 
+    /**
+     * Найден ли Floodgate хотя бы на уровне плагина (без API).
+     * Нужно, чтобы отличить «плагина нет» от «плагин есть, но ещё не поднялся».
+     */
+    private boolean pluginPresent;
+
+    /** Сколько раз пробовали достучаться до API. */
+    private int attempts;
+
     public FloodgateHook(Logger log) {
         this.log = log;
         init();
+    }
+
+    /**
+     * Повторная попытка подключиться к API.
+     *
+     * <p><b>Зачем.</b> На реальном сервере порядок включения оказался таким:
+     * VoidAntiCheat включается на 3 секунды РАНЬШЕ Geyser-Spigot (наш плагин
+     * 17:31:16, Geyser 17:31:18). Floodgate поднимается вместе с Geyser, то
+     * есть в момент нашего {@code onEnable} его API ещё нет — и плагин навсегда
+     * оставался в fallback-режиме, хотя Floodgate в системе был. Повторная
+     * попытка из периодической задачи это исправляет.</p>
+     *
+     * @return {@code true}, если API теперь доступна
+     */
+    public boolean retry() {
+        if (available()) {
+            return true;
+        }
+        attempts++;
+        if (!pluginPresent) {
+            // Плагина нет вообще (например, сервер без Geyser) — не спамим.
+            return false;
+        }
+        init();
+        if (available()) {
+            log.info("Floodgate подключён со " + attempts + "-й попытки (плагин поднялся позже)");
+            return true;
+        }
+        return false;
+    }
+
+    /** Сколько попыток переподключения было. */
+    public int attempts() {
+        return attempts;
     }
 
     private void init() {
@@ -30,9 +73,11 @@ public final class FloodgateHook {
             plugin = Bukkit.getPluginManager().getPlugin("floodgate");
         }
         if (plugin == null) {
+            pluginPresent = false;
             log.warning("Floodgate не найден: VoidAntiCheat будет использовать fallback из config.yml");
             return;
         }
+        pluginPresent = true;
         try {
             Class<?> apiClass = Class.forName("org.geysermc.floodgate.api.FloodgateApi",
                     true, plugin.getClass().getClassLoader());

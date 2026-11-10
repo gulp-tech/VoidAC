@@ -310,6 +310,21 @@ def main() -> int:
     if "lastAvgLabelMillis" not in susp_text:
         fail("метка AVG без троттлинга — пересборка каждый тик")
 
+    # --- 4h. запрет самовызова в методах (StackOverflowError) -------------
+    # Реальная ошибка из продакшена: `return enforcementEnabled();` внутри
+    # самого enforcementEnabled. Цикл -> StackOverflowError на каждом
+    # PlayerMoveEvent -> движение вообще не проверялось. Ловим класс целиком.
+    checks += 1
+    recursion = _re.findall(
+        r'(?:private|public|protected)\s+[\w<>\[\],\s]+?\s+(\w+)\s*\([^)]*\)\s*\{\s*return\s+\1\s*\([^)]*\)\s*;',
+        src_text, _re.S)
+    if recursion:
+        fail(f"самовызов в методе {recursion} — бесконечная рекурсия, StackOverflowError")
+
+    checks += 1
+    if 'return confBool("settings.enforcement", true);' not in src_text:
+        fail("enforcementEnabled не читает settings.enforcement напрямую")
+
     # --- 5. периодическая задача ничего не делает сама ----------------------
     sec_start, sec_end = body_of(lines, "private void secondTick(")
     sec_body = "\n".join(lines[sec_start: sec_end + 1])

@@ -129,6 +129,8 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
     private final Set<UUID> alertsOff = new HashSet<>();
 
     private FloodgateHook floodgate;
+    /** Счётчик попыток догнать Floodgate (максимум 30 — дальше не спамим). */
+    private int floodgateAttempts;
     private BedrockCoreBridge coreBridge;
     private AntiEspManager antiEsp;
     private DeviceProbe deviceProbe;
@@ -716,8 +718,21 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
      * наблюдения. Для режима «только алерты» это недопустимо — проверка
      * должна молчать, а не телепортировать игрока назад.</p>
      */
+    /**
+     * Включена ли реальная коррекция (отмена/откат/наказание).
+     *
+     * <p>{@code false} = режим «только алерты»: {@code flag()} пишет улику и
+     * выходит, ничего не отменяя. Это же значение показывается в {@code /vac}
+     * и в стартовом логе.</p>
+     *
+     * <p><b>Не вызывайте этот метод из самого себя.</b> В версии 2.0.4 здесь
+     * стоял {@code return enforcementEnabled();} — бесконечная рекурсия,
+     * StackOverflowError на каждом PlayerMoveEvent, из-за которого движение
+     * вообще не проверялось. Тест {@code verify-enforcement.py} теперь
+     * отдельно ищет самовызов в любом методе.</p>
+     */
     private boolean enforcementEnabled() {
-        return enforcementEnabled();
+        return confBool("settings.enforcement", true);
     }
 
     private boolean inGrace(PlayerData data) {
@@ -2647,6 +2662,14 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         long now = System.currentTimeMillis();
         int tick = Bukkit.getCurrentTick();
         long cleanResetMillis = confLong("settings.vl-reset-clean-seconds", 90L) * 1000L;
+        // Floodgate поднимается позже нас (вместе с Geyser) — на реальном
+        // сервере мы включались в 17:31:16, Geyser в 17:31:18, и без этой
+        // попытки плагин навсегда оставался без данных о Bedrock-игроках.
+        // Проверяем нечасто: только пока API не поднялась.
+        if (floodgateAttempts < 30 && !floodgate.available()) {
+            floodgateAttempts++;
+            floodgate.retry();
+        }
         for (Player player : Bukkit.getOnlinePlayers()) {
             PlayerData data = players.get(player.getUniqueId());
             if (data == null) {
