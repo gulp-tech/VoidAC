@@ -29,7 +29,9 @@ jobs:
       - name: Извлечь DEX и манифест (только чтение, ничего не запускаем)
         run: |
           set -euo pipefail
-          mkdir -p apk-analysis
+          OUT="$GITHUB_WORKSPACE/apk-analysis"
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
           cd /tmp/in
           APK=$(ls *.apk | head -1)
           # Список содержимого архива — он же диагностика, если DEX не нашлись.
@@ -37,19 +39,19 @@ jobs:
           # DEX могут лежать и в корне, и без classes-префикса.
           unzip -o -q "$APK" '*.dex' 'AndroidManifest.xml' -d /tmp/dex || true
           ls -l /tmp/dex 2>/dev/null || true
-          cp /tmp/in/listing.txt /tmp/in/SHA256.txt apk-analysis/ || true
+          cp /tmp/in/listing.txt /tmp/in/SHA256.txt "$OUT"/ || true
           if ls /tmp/dex/*.dex >/dev/null 2>&1; then
-            cp -v /tmp/dex/*.dex apk-analysis/ || true
+            cp -v /tmp/dex/*.dex "$OUT"/ || true
           else
-            echo "DEX не найдены — смотри listing.txt" > apk-analysis/README.txt
+            echo "DEX не найдены — смотри listing.txt" > "$OUT"/README.txt
           fi
-          du -sh apk-analysis || true
-          ls -l apk-analysis || true
+          du -sh "$OUT" || true
+          ls -l "$OUT" || true
 
       - name: Разбить крупные DEX (API отдаёт файл целиком в base64)
         run: |
           set -uo pipefail
-          cd apk-analysis
+          cd "$GITHUB_WORKSPACE/apk-analysis"
           mkdir -p chunks
           shopt -s nullglob
           dexes=(*.dex)
@@ -73,7 +75,9 @@ jobs:
           set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add apk-analysis
+          ls -R apk-analysis | head -40
+          git add -A apk-analysis
+          git status --short | head -20
           git diff --cached --quiet && { echo "изменений нет"; exit 0; }
           git commit -m "apk: извлечены DEX Apollon для статического анализа [skip ci]"
           git push
