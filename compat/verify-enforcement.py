@@ -325,6 +325,28 @@ def main() -> int:
     if 'return confBool("settings.enforcement", true);' not in src_text:
         fail("enforcementEnabled не читает settings.enforcement напрямую")
 
+    # --- 4i. KillAura/HitBox/Aim (Apollon и подобные) ---------------------
+    for marker, why in (("aimAndHitboxChecks", "нет проверок молчаливого поворота и hitbox"),
+                        ("isLookingAt", "нет проверки удара по цели вне поля зрения"),
+                        ("aimMovedDegrees", "движение взгляда не накапливается")):
+        checks += 1
+        if marker not in src_text:
+            fail(f"{marker} отсутствует — {why}")
+            break
+
+    checks += 1
+    for marker in ("idleAimStreak", "edgeReachStreak"):
+        if f"{marker}++" not in src_text:
+            fail(f"{marker} не накапливается — проверка сработает с первого удара")
+
+    checks += 1
+    if "BLINDNESS" not in src_text or "isInvisible" not in src_text:
+        fail("aim-проверка не исключает слепоту/невидимость — будут ложные")
+
+    checks += 1
+    if "combat.aim.max-ping" not in src_text:
+        fail("aim-проверка не отключается на высоком пинге")
+
     # --- 5. периодическая задача ничего не делает сама ----------------------
     sec_start, sec_end = body_of(lines, "private void secondTick(")
     sec_body = "\n".join(lines[sec_start: sec_end + 1])

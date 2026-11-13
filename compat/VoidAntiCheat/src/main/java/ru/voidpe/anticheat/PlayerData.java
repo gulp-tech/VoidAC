@@ -14,7 +14,10 @@ import java.util.UUID;
  */
 public final class PlayerData {
 
-    public record TimedTarget(long timeMillis, UUID target) {
+    public record TimedTarget(long timeMillis, UUID target, double distance) {
+        public TimedTarget(long timeMillis, UUID target) {
+            this(timeMillis, target, 0.0);
+        }
     }
 
     public final UUID uuid;
@@ -129,6 +132,14 @@ public final class PlayerData {
     public long scaffoldWindowStartMillis;
     public long lastBigRotationMillis;
     public float rotationBeforeAttack;
+    public float lastYawValue;
+    public float lastPitchValue;
+    /** Накопленное движение взгляда за окно 500 мс (градусы). */
+    public double aimMovedDegrees;
+    public long aimWindowStartMillis;
+    public int idleAimStreak;
+    public int edgeReachStreak;
+    public long lastOffscreenHitMillis;
     public int cpsHighWindows;
 
     // ---------------------------------------------------------------- ввод

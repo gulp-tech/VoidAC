@@ -1377,6 +1377,16 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
 
         float yawDelta = Math.abs(angleDifference(to.getYaw(), data.lastYaw));
         float pitchDelta = Math.abs(to.getPitch() - data.lastPitch);
+        // Движение взгляда за окно: для детекта молчаливых поворотов
+        // (silent rotation). Аимбот поворачивает камеру у себя, а нам шлёт
+        // исходный угол — в позиции этого не видно, но пакеты идут.
+        if (nowMillis - data.aimWindowStartMillis > 500L) {
+            data.aimWindowStartMillis = nowMillis;
+            data.aimMovedDegrees = 0.0;
+        }
+        data.aimMovedDegrees += yawDelta + pitchDelta * 0.5;
+        data.lastYawValue = to.getYaw();
+        data.lastPitchValue = to.getPitch();
         if (yawDelta > 125f || pitchDelta > 70f) {
             data.lastBigRotationMillis = nowMillis;
             data.rotationBeforeAttack = yawDelta;
@@ -2087,7 +2097,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             return;
         }
         long now = System.currentTimeMillis();
-        recordAttack(data, target, now);
+        recordAttack(data, target, now, eyeToBoxDistance(attacker, target));
         recordBotAction(data, now);
         if (inGrace(data) || data.lag.unstable(now)) {
             return;
@@ -2114,6 +2124,10 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             data.attacks.clear();
         }
 
+        // Признаки KillAura/HitBox/Aim: молчаливый поворот, край допуска,
+        // удар по цели вне поля зрения. Все требуют серии.
+        aimAndHitboxChecks(attacker, data, target, measureReach(attacker, data, target, now), now);
+
         // Удары сквозь стену: только серией и не на короткой дистанции.
         double distance = eyeToBoxDistance(attacker, target);
         if (distance > confDouble("combat.killaura-wall-min-distance", 1.90)
@@ -2124,11 +2138,96 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         }
     }
 
-    private void recordAttack(PlayerData data, LivingEntity target, long now) {
+    /**
+     * Три признака чита, которые Apollon и подобные выдают независимо от
+     * настроек модулей.
+     *
+     * <p>Публичное описание Apollon v6.71: «KillAura реагирует на хитбоксы
+     * плавнее», «улучшен Anti-Bot для обхода современных античитов». То есть
+     * клиент прячет вращение и маскируется под бота. Поэтому смотрим не на
+     * плавность, а на то, чего у человека не бывает:</p>
+     *
+     * <ol>
+     *   <li><b>Молчаливый поворот.</b> Перед ударом человек целится — поворот
+     *       виден в пакетах. Если попадание есть, а взгляд за 500 мс не
+     *       двинулся ({@code combat.aim.min-rotation-degrees}), камеру
+     *       повернул чит и прислал нам исходный угол.</li>
+     *   <li><b>HitBox.</b> Расширенные хитбоксы дают дистанцию чуть меньше
+     *       порога. У человека она распределена свободно, у чита липнет к
+     *       пределу — считаем попадания в полосу перед лимитом.</li>
+     *   <li><b>Удар по цели вне поля зрения.</b> KillAura бьёт по списку
+     *       сущностей, а не по тому, что видно.</li>
+     * </ol>
+     *
+     * <p>Все три требуют <b>серии</b>: одиночный случай даёт лаг, поворот на
+     * бегу или эффект слепоты. Слепота, тьма, невидимость, спектатор и
+     * высокий пинг исключаются явно.</p>
+     */
+    private void aimAndHitboxChecks(Player attacker, PlayerData data, LivingEntity target,
+                                    ReachVerdict verdict, long now) {
+        double aimThreshold = confDouble("combat.aim.min-rotation-degrees", 1.5);
+        if (data.aimMovedDegrees < aimThreshold) {
+            data.idleAimStreak++;
+        } else {
+            data.idleAimStreak = Math.max(0, data.idleAimStreak - 1);
+        }
+        int idleLimit = confInt("combat.aim.idle-streak", 4);
+        if (data.idleAimStreak >= idleLimit) {
+            flag(attacker, data, CheckId.KILLAURA, 1.0,
+                    "удар без движения взгляда " + data.idleAimStreak + " раз подряд");
+            data.idleAimStreak = 0;
+        }
+
+        double limit = verdict.limit();
+        double band = confDouble("combat.hitbox.band", 0.35);
+        boolean nearEdge = verdict.distance() > limit - band && verdict.distance() <= limit;
+        if (nearEdge) {
+            data.edgeReachStreak++;
+        } else {
+            data.edgeReachStreak = Math.max(0, data.edgeReachStreak - 1);
+        }
+        int edgeLimit = confInt("combat.hitbox.streak", 6);
+        if (data.edgeReachStreak >= edgeLimit) {
+            flag(attacker, data, CheckId.REACH, 1.0,
+                    "дистанция " + data.edgeReachStreak + " раз подряд у предела ("
+                            + formatVl(verdict.distance()) + " при " + formatVl(limit) + ")");
+            data.edgeReachStreak = 0;
+        }
+
+        if (!attacker.hasPotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS)
+                && !attacker.hasPotionEffect(org.bukkit.potion.PotionEffectType.DARKNESS)
+                && !target.isInvisible()
+                && attacker.getGameMode() != org.bukkit.GameMode.SPECTATOR
+                && attacker.getPing() < confInt("combat.aim.max-ping", 250)) {
+            if (!isLookingAt(attacker, target, confDouble("combat.aim.fov-degrees", 75.0))) {
+                data.lastOffscreenHitMillis = now;
+                flag(attacker, data, CheckId.KILLAURA, 1.0,
+                        "удар по цели вне поля зрения (" + target.getName() + ")");
+            }
+        }
+    }
+
+    /** Смотрит ли игрок в сторону цели в пределах угла {@code fovDegrees}. */
+    private boolean isLookingAt(Player player, LivingEntity target, double fovDegrees) {
+        try {
+            org.bukkit.util.Vector toTarget = target.getEyeLocation().toVector()
+                    .subtract(player.getEyeLocation().toVector());
+            if (toTarget.lengthSquared() < 1.0E-6) {
+                return true;
+            }
+            toTarget.normalize();
+            double dot = player.getEyeLocation().getDirection().normalize().dot(toTarget);
+            return dot >= Math.cos(Math.toRadians(fovDegrees));
+        } catch (Throwable ignored) {
+            return true; // сомневаемся — не флагуем
+        }
+    }
+
+    private void recordAttack(PlayerData data, LivingEntity target, long now, double distance) {
         while (!data.attacks.isEmpty() && now - data.attacks.peekFirst().timeMillis() > 2500L) {
             data.attacks.removeFirst();
         }
-        data.attacks.addLast(new PlayerData.TimedTarget(now, target.getUniqueId()));
+        data.attacks.addLast(new PlayerData.TimedTarget(now, target.getUniqueId(), distance));
         while (data.attacks.size() > 24) {
             data.attacks.removeFirst();
         }
