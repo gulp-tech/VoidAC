@@ -2017,7 +2017,9 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         if (!(event.getInventory().getHolder() instanceof org.bukkit.block.Container container)) {
             return;
         }
-        Player player = event.getPlayer();
+        if (!(event.getPlayer() instanceof Player player)) {
+            return; // NPC/мод-сущности: не наше дело
+        }
         PlayerData data = data(player);
         if (!shouldCheck(player, data) || inGrace(data) || data.lag.unstable(System.currentTimeMillis())) {
             return;
