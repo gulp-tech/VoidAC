@@ -1395,6 +1395,13 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             data.silentAimWindowDegrees = 0.0;
             data.silentAimWindowStart = nowMillis;
         }
+        // Отдельное окно 1 с для контейнеров: клик по сундуку рукой
+        // обязательно сопровождается движением взгляда.
+        data.chestAimDegrees += yawDelta + pitchDelta * 0.5;
+        if (nowMillis - data.chestWindowStartMillis > 1000L) {
+            data.chestAimDegrees = 0.0;
+            data.chestWindowStartMillis = nowMillis;
+        }
         if (yawDelta > 125f || pitchDelta > 70f) {
             data.lastBigRotationMillis = nowMillis;
             data.rotationBeforeAttack = yawDelta;
@@ -1990,6 +1997,76 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
      * Ранняя проверка Reach. Стоит на LOWEST, потому что именно здесь можно
      * отменить удар; алерты/буфер общие.
      */
+    /**
+     * ChestAura / INFINITY_AURA — модули клиента Arlen (com.arlen.app),
+     * которые сами открывают контейнеры вокруг игрока.
+     *
+     * <p>Ловим не факт открытия (его даёт и ванильный клик), а сочетание,
+     * которого у живого игрока не бывает:</p>
+     * <ul>
+     *   <li>контейнер дальше ванильного доступа;</li>
+     *   <li>игрок к нему не подходил за последние 3 секунды;</li>
+     *   <li>взгляд за последнюю секунду не двигался.</li>
+     * </ul>
+     *
+     * <p>Требуется серия. Исключены: слепота, тьма, высокий пинг, а также
+     * случай, когда позиция контейнера в другом мире.</p>
+     */
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onOpenContainer(org.bukkit.event.inventory.InventoryOpenEvent event) {
+        if (!(event.getInventory().getHolder() instanceof org.bukkit.block.Container container)) {
+            return;
+        }
+        Player player = event.getPlayer();
+        PlayerData data = data(player);
+        if (!shouldCheck(player, data) || inGrace(data) || data.lag.unstable(System.currentTimeMillis())) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        Location chest = container.getLocation();
+        if (chest.getWorld() == null || !chest.getWorld().equals(player.getWorld())) {
+            return;
+        }
+        if (player.hasPotionEffect(org.bukkit.potion.PotionEffectType.BLINDNESS)
+                || player.hasPotionEffect(org.bukkit.potion.PotionEffectType.DARKNESS)
+                || player.getGameMode() == org.bukkit.GameMode.SPECTATOR
+                || effectivePing(player, data) >= confInt("combat.chestaura.max-ping", 300)) {
+            data.chestAuraStreak = 0;
+            return;
+        }
+
+        double limit = confDouble("combat.chestaura.max-distance-blocks", 4.5);
+        double distance = player.getEyeLocation().toVector()
+                .distance(chest.toVector().add(new Vector(0.5, 0.5, 0.5)));
+        if (distance < limit) {
+            data.chestAuraStreak = Math.max(0, data.chestAuraStreak - 1);
+            return;
+        }
+
+        // Насколько близко игрок был к контейнеру за последние 3 секунды.
+        // Подходил — обычное открытие, не аура.
+        if (now - data.chestWindowStartMillis > 3000L) {
+            data.chestNearestDistance = distance;
+            data.chestWindowStartMillis = now;
+        } else {
+            data.chestNearestDistance = Math.min(data.chestNearestDistance, distance);
+        }
+
+        boolean noApproach = data.chestNearestDistance >= limit;
+        boolean noAim = data.chestAimDegrees < confDouble("combat.chestaura.max-aim-degrees", 3.0);
+        if (noApproach && noAim) {
+            data.chestAuraStreak++;
+        } else {
+            data.chestAuraStreak = Math.max(0, data.chestAuraStreak - 1);
+        }
+        if (data.chestAuraStreak >= confInt("combat.chestaura.streak", 2)) {
+            flag(player, data, CheckId.KILLAURA, 1.5,
+                    "ChestAura: контейнер на " + formatVl(distance) + " бл. без подхода и без движения взгляда ("
+                            + data.chestAuraStreak + " раз)");
+            data.chestAuraStreak = 0;
+        }
+    }
+
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
     public void onAttackReach(EntityDamageByEntityEvent event) {
         if (!(event.getDamager() instanceof Player attacker) || !(event.getEntity() instanceof LivingEntity target)) {

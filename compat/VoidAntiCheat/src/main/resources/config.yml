@@ -324,6 +324,15 @@ combat:
     silent-max-window-degrees: 2.0
     silent-streak: 3
     max-ping: 250
+  # ChestAura / INFINITY_AURA — модули клиента Arlen (com.arlen.app):
+  # сами открывают контейнеры вокруг игрока, не подходя к ним.
+  # Порог дистанции ниже ванильного доступа намеренно: обычное открытие
+  # сундука всегда ближе 4.5 бл.
+  chestaura:
+    max-distance-blocks: 4.5
+    max-aim-degrees: 3.0
+    streak: 2
+    max-ping: 300
   hitbox:
     band: 0.35
     streak: 6

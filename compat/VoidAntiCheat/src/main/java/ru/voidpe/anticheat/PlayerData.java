@@ -149,6 +149,21 @@ public final class PlayerData {
      * Человек, который мажет, взгляд всё равно поворачивает.
      */
     public int silentRotationStreak;
+    /**
+     * ChestAura / INFINITY_AURA (com.arlen.app, клиент Arlen). Модуль сам
+     * открывает контейнеры вокруг игрока, не подходя к ним.
+     *
+     * <p>Улика в сочетании трёх вещей, которое у живого игрока не встречается:
+     * контейнер далеко (за пределами ванильного доступа), игрок к нему не
+     * приближался, и взгляд за последнюю секунду не двигался. Клик по
+     * контейнеру руками требует как минимум подойти или посмотреть.</p>
+     */
+    public int chestAuraStreak;
+    /** Минимальное расстояние до контейнера за окно 3 с, блоки. */
+    public double chestNearestDistance = Double.MAX_VALUE;
+    public long chestWindowStartMillis;
+    /** Накопленный поворот взгляда за окно 1 с, градусы. */
+    public double chestAimDegrees;
     /** Сколько градусов взгляд прошёл за окно [silentAimWindowStart, now]. */
     public double silentAimWindowDegrees;
     public long silentAimWindowStart;

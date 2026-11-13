@@ -368,6 +368,24 @@ def main() -> int:
     if "combat.aim.silent-streak" not in src_text:
         fail("проверка скрытого поворота не требует серии")
 
+    # ChestAura (com.arlen.app): открытие контейнера без подхода и без
+    # движения взгляда. Обязательно требует серию и исключает слепоту,
+    # иначе обычные игроки начнут ловить алерты.
+    checks += 1
+    if "onOpenContainer" not in src_text:
+        fail("нет проверки ChestAura — контейнеры в радиусе не отслеживаются")
+    checks += 1
+    for marker in ("chestAuraStreak", "chestNearestDistance", "chestAimDegrees"):
+        if marker not in src_text:
+            fail(f"{marker} отсутствует — ChestAura не может отличить обычное открытие")
+            break
+    checks += 1
+    if "combat.chestaura.streak" not in src_text:
+        fail("ChestAura не требует серии — будут ложные срабатывания")
+    checks += 1
+    if "combat.chestaura.max-ping" not in src_text:
+        fail("ChestAura не отключается на высоком пинге")
+
     # Боевые проверки обязаны стоять ДО отмены удара reach-проверкой, иначе
     # при включённом enforcement они не выполняются вовсе.
     checks += 1
