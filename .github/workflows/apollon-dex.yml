@@ -48,10 +48,16 @@ jobs:
 
       - name: Разбить крупные DEX (API отдаёт файл целиком в base64)
         run: |
-          set -euo pipefail
+          set -uo pipefail
           cd apk-analysis
           mkdir -p chunks
-          for f in *.dex; do
+          shopt -s nullglob
+          dexes=(*.dex)
+          if [ ${#dexes[@]} -eq 0 ]; then
+            echo "DEX нет — нечего делить"
+            exit 0
+          fi
+          for f in "${dexes[@]}"; do
             size=$(stat -c%s "$f")
             echo "$f: $size байт"
             if [ "$size" -le 35000000 ]; then
