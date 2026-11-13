@@ -32,11 +32,19 @@ jobs:
           mkdir -p apk-analysis
           cd /tmp/in
           APK=$(ls *.apk | head -1)
-          unzip -o -q "$APK" 'classes*.dex' 'AndroidManifest.xml' -d /tmp/dex || true
-          find /tmp/dex -type f -exec ls -l {} \;
-          cp -v /tmp/dex/*.dex apk-analysis/ 2>/dev/null || true
-          cp -v /tmp/in/SHA256.txt apk-analysis/
-          du -sh apk-analysis
+          # Список содержимого архива — он же диагностика, если DEX не нашлись.
+          unzip -l "$APK" > /tmp/in/listing.txt || true
+          # DEX могут лежать и в корне, и без classes-префикса.
+          unzip -o -q "$APK" '*.dex' 'AndroidManifest.xml' -d /tmp/dex || true
+          ls -l /tmp/dex 2>/dev/null || true
+          cp /tmp/in/listing.txt /tmp/in/SHA256.txt apk-analysis/ || true
+          if ls /tmp/dex/*.dex >/dev/null 2>&1; then
+            cp -v /tmp/dex/*.dex apk-analysis/ || true
+          else
+            echo "DEX не найдены — смотри listing.txt" > apk-analysis/README.txt
+          fi
+          du -sh apk-analysis || true
+          ls -l apk-analysis || true
 
       - name: Разбить крупные DEX (API отдаёт файл целиком в base64)
         run: |
