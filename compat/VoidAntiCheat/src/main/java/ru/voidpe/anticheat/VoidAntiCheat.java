@@ -1380,13 +1380,21 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         // Движение взгляда за окно: для детекта молчаливых поворотов
         // (silent rotation). Аимбот поворачивает камеру у себя, а нам шлёт
         // исходный угол — в позиции этого не видно, но пакеты идут.
-        if (nowMillis - data.aimWindowStartMillis > 500L) {
-            data.aimWindowStartMillis = nowMillis;
-            data.aimMovedDegrees = 0.0;
-        }
+        // Окно 500 мс. Сбрасываем ПОСЛЕ накопления, иначе сумма никогда не
+        // превышает одного межпакетного поворота и любой игрок выглядит
+        // «не двигающим взгляд».
         data.aimMovedDegrees += yawDelta + pitchDelta * 0.5;
+        if (nowMillis - data.aimWindowStartMillis > 500L) {
+            data.aimMovedDegrees = 0.0;
+            data.aimWindowStartMillis = nowMillis;
+        }
         data.lastYawValue = to.getYaw();
         data.lastPitchValue = to.getPitch();
+        data.silentAimWindowDegrees += yawDelta + pitchDelta * 0.5;
+        if (nowMillis - data.silentAimWindowStart > 250L) {
+            data.silentAimWindowDegrees = 0.0;
+            data.silentAimWindowStart = nowMillis;
+        }
         if (yawDelta > 125f || pitchDelta > 70f) {
             data.lastBigRotationMillis = nowMillis;
             data.rotationBeforeAttack = yawDelta;
@@ -2087,7 +2095,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         return Math.sqrt(dx * dx + dy * dy + dz * dz);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    @EventHandler(priority = EventPriority.NORMAL, ignoreCancelled = true)
     public void onAttack(EntityDamageByEntityEvent event) {
         if (!(event.getDamager() instanceof Player attacker) || !(event.getEntity() instanceof LivingEntity target)) {
             return;
@@ -2203,6 +2211,29 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 data.lastOffscreenHitMillis = now;
                 flag(attacker, data, CheckId.KILLAURA, 1.0,
                         "удар по цели вне поля зрения (" + target.getName() + ")");
+
+                // Скрытый поворот: удар мимо взгляда при неподвижном взгляде.
+                // В бинарнике Apollon v6.71 это модули rotations/rotationsRange
+                // плюс emulateNativeAttack — камера поворачивается только на
+                // клиенте, на сервер уходит исходный угол.
+                //
+                // Отличие от обычного промаха: человек, бьющий мимо, всё равно
+                // ведёт мышь, поэтому взгляд за 250 мс проходит заметный угол.
+                // Требуем серию, чтобы одиночный лаг или рассинхрон не флагил.
+                double idleDegrees = confDouble("combat.aim.silent-max-window-degrees", 2.0);
+                if (data.silentAimWindowDegrees < idleDegrees) {
+                    data.silentRotationStreak++;
+                } else {
+                    data.silentRotationStreak = Math.max(0, data.silentRotationStreak - 1);
+                }
+                if (data.silentRotationStreak >= confInt("combat.aim.silent-streak", 3)) {
+                    flag(attacker, data, CheckId.KILLAURA, 1.5,
+                            "скрытый поворот: " + data.silentRotationStreak
+                                    + " удара мимо взгляда при неподвижной камере");
+                    data.silentRotationStreak = 0;
+                }
+            } else {
+                data.silentRotationStreak = Math.max(0, data.silentRotationStreak - 1);
             }
         }
     }

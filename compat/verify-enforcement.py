@@ -347,6 +347,36 @@ def main() -> int:
     if "combat.aim.max-ping" not in src_text:
         fail("aim-проверка не отключается на высоком пинге")
 
+    # Обнуление окна ДО накопления делает сумму бесполезной: она никогда не
+    # превышает одного межпакетного поворота, и тогда любой игрок выглядит
+    # «не двигающим взгляд». Ловим именно этот порядок операций.
+    checks += 1
+    bad_window = _re.search(
+        r"aimWindowStartMillis\s*=\s*nowMillis;\s*\n\s*data\.aimMovedDegrees\s*=\s*0\.0;\s*\n\s*}"
+        r"\s*\n\s*data\.aimMovedDegrees\s*\+=", src_text)
+    if bad_window:
+        fail("окно aimMovedDegrees обнуляется до накопления — сумма всегда около нуля, "
+             "idleAimStreak растёт у любого игрока")
+
+    # Скрытый поворот: удар мимо взгляда при неподвижной камере.
+    checks += 1
+    for marker in ("silentRotationStreak", "silentAimWindowDegrees"):
+        if marker not in src_text:
+            fail(f"{marker} отсутствует — silent rotation от KillAura не ловится")
+            break
+    checks += 1
+    if "combat.aim.silent-streak" not in src_text:
+        fail("проверка скрытого поворота не требует серии")
+
+    # Боевые проверки обязаны стоять ДО отмены удара reach-проверкой, иначе
+    # при включённом enforcement они не выполняются вовсе.
+    checks += 1
+    m = _re.search(r"@EventHandler\([^)]*\)\s*\n\s*public void onAttack\(", src_text)
+    if not m:
+        fail("не найден обработчик onAttack")
+    elif "EventPriority.MONITOR" in m.group(0):
+        fail("onAttack на MONITOR: reach уже мог отменить удар, боевые проверки не работают")
+
     # --- 5. периодическая задача ничего не делает сама ----------------------
     sec_start, sec_end = body_of(lines, "private void secondTick(")
     sec_body = "\n".join(lines[sec_start: sec_end + 1])

@@ -317,6 +317,12 @@ combat:
     min-rotation-degrees: 1.5
     idle-streak: 4
     fov-degrees: 75.0
+    # Скрытый поворот (silent rotation) — модули rotations/rotationsRange
+    # и emulateNativeAttack в libReverseSigma.so клиента Apollon v6.71.
+    # Удар по цели вне взгляда при неподвижной камере. Порог в градусах за
+    # окно 250 мс: человек, промахивающийся, всё равно ведёт мышь.
+    silent-max-window-degrees: 2.0
+    silent-streak: 3
     max-ping: 250
   hitbox:
     band: 0.35

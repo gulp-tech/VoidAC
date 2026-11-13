@@ -140,6 +140,18 @@ public final class PlayerData {
     public int idleAimStreak;
     public int edgeReachStreak;
     public long lastOffscreenHitMillis;
+    /**
+     * Скрытый поворот: KillAura (silent rotation) бьёт по цели, повернув камеру
+     * только на своей стороне, а на сервер шлёт исходный угол. В бинарнике
+     * Apollon за это отвечают {@code rotations}/{@code rotationsRange} и
+     * {@code emulateNativeAttack}. Признак — удар по цели, в которую игрок не
+     * смотрит, но при этом его собственный взгляд за окно не двигался.
+     * Человек, который мажет, взгляд всё равно поворачивает.
+     */
+    public int silentRotationStreak;
+    /** Сколько градусов взгляд прошёл за окно [silentAimWindowStart, now]. */
+    public double silentAimWindowDegrees;
+    public long silentAimWindowStart;
     public int cpsHighWindows;
 
     // ---------------------------------------------------------------- ввод
