@@ -7,6 +7,52 @@ on:
 permissions:
   contents: write
 jobs:
+  dex-zip:
+    # Второй набор DEX: релиз `cheat` -> dex.zip. Из песочницы
+    # release-assets.githubusercontent.com недоступен, поэтому качаем здесь
+    # и коммитим в ветку, откуда читаем через api.github.com.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Скачать dex.zip из релиза cheat
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -x
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            -o /tmp/dex.zip \
+            https://api.github.com/repos/gulp-tech/VoidAC/releases/assets/743903251
+          ls -l /tmp/dex.zip
+          file /tmp/dex.zip || true
+          sha256sum /tmp/dex.zip || true
+
+      - name: Распаковать и записать хэши
+        run: |
+          OUT="$GITHUB_WORKSPACE/apk-analysis/new-cheats"
+          mkdir -p "$OUT"
+          unzip -o -q /tmp/dex.zip -d "$OUT" || true
+          echo "=== файлы ==="
+          find "$OUT" -type f -printf '%s\t%p\n' | head -60
+          ( cd "$OUT" && sha256sum $(find . -type f ! -name SHA256.txt) ) > "$OUT/SHA256.txt" 2>/dev/null || true
+          cat "$OUT/SHA256.txt" || true
+
+      - name: Закоммитить в ветку
+        run: |
+          git config user.name "vac-bot"
+          git config user.email "bot@voidpe.local"
+          git add -A apk-analysis/new-cheats
+          if git diff --cached --quiet; then
+            echo "нечего коммитить"
+          else
+            git commit -m "CI: dex.zip из релиза cheat [skip ci]"
+            git push
+          fi
+
   extract:
     runs-on: ubuntu-latest
     timeout-minutes: 30
