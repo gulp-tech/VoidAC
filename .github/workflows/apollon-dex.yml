@@ -38,10 +38,15 @@ jobs:
           unzip -l "$APK" > /tmp/in/listing.txt || true
           # DEX могут лежать и в корне, и без classes-префикса.
           unzip -o -q "$APK" '*.dex' 'AndroidManifest.xml' -d /tmp/dex || true
+          # libReverseSigma.so — единственная библиотека с датой сборки 2026
+          # (остальные от 2008), в ней и живёт код клиента.
+          unzip -o -q "$APK" 'lib/arm64-v8a/libReverseSigma.so' -d /tmp/native || true
+          ls -l /tmp/native/lib/arm64-v8a/ 2>/dev/null || true
           ls -l /tmp/dex 2>/dev/null || true
           cp /tmp/in/listing.txt /tmp/in/SHA256.txt "$OUT"/ || true
           if ls /tmp/dex/*.dex >/dev/null 2>&1; then
             cp -v /tmp/dex/*.dex "$OUT"/ || true
+            cp -v /tmp/native/lib/arm64-v8a/libReverseSigma.so "$OUT"/ || true
           else
             echo "DEX не найдены — смотри listing.txt" > "$OUT"/README.txt
           fi
