@@ -1,0 +1,65 @@
+name: Apollon DEX extraction (static analysis input)
+on:
+  push:
+    branches: ['arena/**']
+    paths: ['.github/workflows/apollon-dex.yml', 'test-kit/**']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Скачать APK Apollon (в Actions хост доступен)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/in
+          gh release download cheat --repo gulp-tech/Purpurbedrock \
+            --pattern 'MCPE_Apollon_Client_1.26.60_v6.71_64Bit.1.apk' --dir /tmp/in
+          ls -l /tmp/in
+          sha256sum /tmp/in/*.apk > /tmp/in/SHA256.txt
+
+      - name: Извлечь DEX и манифест (только чтение, ничего не запускаем)
+        run: |
+          set -euo pipefail
+          mkdir -p apk-analysis
+          cd /tmp/in
+          APK=$(ls *.apk | head -1)
+          unzip -o -q "$APK" 'classes*.dex' 'AndroidManifest.xml' -d /tmp/dex || true
+          find /tmp/dex -type f -exec ls -l {} \;
+          cp -v /tmp/dex/*.dex apk-analysis/ 2>/dev/null || true
+          cp -v /tmp/in/SHA256.txt apk-analysis/
+          du -sh apk-analysis
+
+      - name: Разбить крупные DEX (API отдаёт файл целиком в base64)
+        run: |
+          set -euo pipefail
+          cd apk-analysis
+          mkdir -p chunks
+          for f in *.dex; do
+            size=$(stat -c%s "$f")
+            echo "$f: $size байт"
+            if [ "$size" -le 35000000 ]; then
+              cp "$f" "chunks/$f"
+            else
+              split -b 35000000 -d -a 2 "$f" "chunks/${f}.part"
+            fi
+          done
+          ls -l chunks/ | head -30
+
+      - name: Закоммитить в ветку
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add apk-analysis
+          git diff --cached --quiet && { echo "изменений нет"; exit 0; }
+          git commit -m "apk: извлечены DEX Apollon для статического анализа [skip ci]"
+          git push
