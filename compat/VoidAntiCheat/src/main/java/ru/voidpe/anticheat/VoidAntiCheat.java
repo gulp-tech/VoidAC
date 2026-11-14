@@ -1390,6 +1390,15 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         }
         data.lastYawValue = to.getYaw();
         data.lastPitchValue = to.getPitch();
+        // История позиций на 3 с: нужна, чтобы отличить «подошёл и открыл»
+        // от «открыл, не подходя». Храним не больше 40 точек.
+        data.positions.addLast(new PlayerData.PositionAt(nowMillis, to.getX(), to.getY(), to.getZ()));
+        while (!data.positions.isEmpty() && nowMillis - data.positions.peekFirst().timeMillis() > 3000L) {
+            data.positions.removeFirst();
+        }
+        while (data.positions.size() > 40) {
+            data.positions.removeFirst();
+        }
         data.silentAimWindowDegrees += yawDelta + pitchDelta * 0.5;
         if (nowMillis - data.silentAimWindowStart > 250L) {
             data.silentAimWindowDegrees = 0.0;
@@ -2042,16 +2051,31 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             return;
         }
 
-        // Насколько близко игрок был к контейнеру за последние 3 секунды.
-        // Подходил — обычное открытие, не аура.
-        if (now - data.chestWindowStartMillis > 3000L) {
-            data.chestNearestDistance = distance;
-            data.chestWindowStartMillis = now;
-        } else {
-            data.chestNearestDistance = Math.min(data.chestNearestDistance, distance);
+        // Подходил ли игрок к ЭТОМУ контейнеру за последние 3 секунды.
+        //
+        // Раньше здесь сравнивалось расстояние до контейнера с ним же самим
+        // (chestNearestDistance инициализировалось текущей дистанцией), из-за
+        // чего условие было тождественно истинным и «улики подхода» не было
+        // вовсе. Теперь смотрим фактическую историю позиций: если игрок хоть
+        // раз был ближе ванильного доступа к этой точке — открытие обычное.
+        Vector chestCenter = chest.toVector().add(new Vector(0.5, 0.5, 0.5));
+        double nearest = Double.MAX_VALUE;
+        for (PlayerData.PositionAt pos : data.positions) {
+            if (now - pos.timeMillis() > 3000L) {
+                continue;
+            }
+            double d = Math.sqrt(Math.pow(pos.x() - chestCenter.getX(), 2)
+                    + Math.pow(pos.y() + 1.62 - chestCenter.getY(), 2)
+                    + Math.pow(pos.z() - chestCenter.getZ(), 2));
+            nearest = Math.min(nearest, d);
         }
+        // Истории нет (только зашёл) — не флагуем вовсе.
+        if (nearest == Double.MAX_VALUE) {
+            return;
+        }
+        data.chestNearestApproach = nearest;
 
-        boolean noApproach = data.chestNearestDistance >= limit;
+        boolean noApproach = nearest >= limit;
         boolean noAim = data.chestAimDegrees < confDouble("combat.chestaura.max-aim-degrees", 3.0);
         if (noApproach && noAim) {
             data.chestAuraStreak++;
@@ -2060,7 +2084,8 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         }
         if (data.chestAuraStreak >= confInt("combat.chestaura.streak", 2)) {
             flag(player, data, CheckId.KILLAURA, 1.5,
-                    "ChestAura: контейнер на " + formatVl(distance) + " бл. без подхода и без движения взгляда ("
+                    "ChestAura: контейнер на " + formatVl(distance) + " бл., ближе "
+                            + formatVl(nearest) + " бл. игрок не был, взгляд не двигался ("
                             + data.chestAuraStreak + " раз)");
             data.chestAuraStreak = 0;
         }
@@ -2250,7 +2275,11 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
     private void aimAndHitboxChecks(Player attacker, PlayerData data, LivingEntity target,
                                     ReachVerdict verdict, long now) {
         double aimThreshold = confDouble("combat.aim.min-rotation-degrees", 1.5);
-        if (data.aimMovedDegrees < aimThreshold) {
+        // Окно считается только если оно реально наполнилось: сразу после
+        // входа/телепорта aimMovedDegrees ещё нулевой, и удары в пределах
+        // 500 мс дали бы ложную пару «не двигал взглядом».
+        boolean windowFilled = now - data.aimWindowStartMillis >= 500L;
+        if (windowFilled && data.aimMovedDegrees < aimThreshold) {
             data.idleAimStreak++;
         } else {
             data.idleAimStreak = Math.max(0, data.idleAimStreak - 1);
@@ -2313,7 +2342,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             }
         }
 
-        preciseAimCheck(attacker, data, target);
+        preciseAimCheck(attacker, data, target, verdict.distance());
     }
 
     /**
@@ -2330,7 +2359,16 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
      * распределение широкое. Требуется серия подряд И высокая доля точных
      * ударов — двойное условие как раз для «обычные игроки не страдают».</p>
      */
-    private void preciseAimCheck(Player attacker, PlayerData data, LivingEntity target) {
+    private void preciseAimCheck(Player attacker, PlayerData data, LivingEntity target, double distance) {
+        // Вплотную угол до центра цели — плохая улика: на 1.5 бл. цель
+        // занимает +/-11°, и попасть в 1.2° можно случайно, без чита.
+        // Улика имеет смысл только на дистанции, где случайное попадание
+        // в узкий угол маловероятно.
+        double minDistance = confDouble("combat.aim.precise-min-distance", 2.5);
+        if (distance < minDistance) {
+            data.preciseAimStreak = Math.max(0, data.preciseAimStreak - 1);
+            return;
+        }
         double error = eyeAngleError(attacker, target);
         if (error < 0.0) {
             return; // посчитать не смогли — не флагуем

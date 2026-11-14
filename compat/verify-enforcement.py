@@ -335,6 +335,9 @@ def main() -> int:
             break
 
     checks += 1
+    if "windowFilled" not in src_text:
+        fail("idleAimStreak без проверки заполнения окна — ложные сразу после входа")
+    checks += 1
     for marker in ("idleAimStreak", "edgeReachStreak"):
         if f"{marker}++" not in src_text:
             fail(f"{marker} не накапливается — проверка сработает с первого удара")
@@ -382,6 +385,11 @@ def main() -> int:
     checks += 1
     if "precise-error-degrees" not in src_text:
         fail("порог точности прицела не настраивается")
+    # Точность прицела как улика работает только на дистанции: вплотную
+    # цель занимает десятки градусов и попасть в 1.2° можно без чита.
+    checks += 1
+    if "precise-min-distance" not in src_text:
+        fail("точность прицела без минимальной дистанции — ложные в ближнем бою")
 
     # ChestAura (com.arlen.app): открытие контейнера без подхода и без
     # движения взгляда. Обязательно требует серию и исключает слепоту,
@@ -390,7 +398,7 @@ def main() -> int:
     if "onOpenContainer" not in src_text:
         fail("нет проверки ChestAura — контейнеры в радиусе не отслеживаются")
     checks += 1
-    for marker in ("chestAuraStreak", "chestNearestDistance", "chestAimDegrees"):
+    for marker in ("chestAuraStreak", "chestNearestApproach", "chestAimDegrees", "positions"):
         if marker not in src_text:
             fail(f"{marker} отсутствует — ChestAura не может отличить обычное открытие")
             break
@@ -400,6 +408,17 @@ def main() -> int:
     checks += 1
     if "combat.chestaura.max-ping" not in src_text:
         fail("ChestAura не отключается на высоком пинге")
+
+    # Улика «игрок не подходил» обязана опираться на историю позиций.
+    # Если она сравнивает текущую дистанцию с ней же — это тавтология,
+    # и проверка не detects ничего, кроме факта открытия.
+    checks += 1
+    if "PositionAt" not in src_text or "positions" not in src_text:
+        fail("ChestAura: нет истории позиций — «не подходил» вырождается в тавтологию")
+    checks += 1
+    if _re.search(r"chestNearest\w*\s*=\s*distance\s*;", src_text):
+        fail("ChestAura: ближайшее расстояние инициализируется текущим — "
+             "условие noApproach всегда истинно")
 
     # Боевые проверки обязаны стоять ДО отмены удара reach-проверкой, иначе
     # при включённом enforcement они не выполняются вовсе.

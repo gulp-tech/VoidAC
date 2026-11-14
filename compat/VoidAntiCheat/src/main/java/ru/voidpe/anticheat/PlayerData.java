@@ -168,8 +168,13 @@ public final class PlayerData {
      * контейнеру руками требует как минимум подойти или посмотреть.</p>
      */
     public int chestAuraStreak;
-    /** Минимальное расстояние до контейнера за окно 3 с, блоки. */
-    public double chestNearestDistance = Double.MAX_VALUE;
+    /** Запись позиции игрока для проверки «подходил ли он к контейнеру». */
+    public record PositionAt(long timeMillis, double x, double y, double z) {
+    }
+
+    public final ArrayDeque<PositionAt> positions = new ArrayDeque<>();
+    /** Ближайшая позиция игрока к контейнеру за последние 3 с, блоки. */
+    public double chestNearestApproach = Double.MAX_VALUE;
     public long chestWindowStartMillis;
     /** Накопленный поворот взгляда за окно 1 с, градусы. */
     public double chestAimDegrees;
