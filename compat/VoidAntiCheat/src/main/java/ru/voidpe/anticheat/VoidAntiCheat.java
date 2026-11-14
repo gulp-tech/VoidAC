@@ -2315,6 +2315,87 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 data.silentRotationStreak = Math.max(0, data.silentRotationStreak - 1);
             }
         }
+
+        preciseAimCheck(attacker, data, target);
+    }
+
+    /**
+     * Точность прицела в момент удара — то, что нельзя отключить настройкой.
+     *
+     * <p>KillAura/AimAssist (KillAuraModule, InfinityAuraModule, AimAssist
+     * клиента Arlen; killAura/targetLock/rotationsRange Apollon) настраивают
+     * порог поворота, радиус, задержку и CPS. Точность наводки настраивать
+     * нельзя: если модуль не навёл взгляд на цель, удар по ней не пройдёт.
+     * Поэтому у любого работающего aimbot угол между взглядом и направлением
+     * на цель в момент удара близок к нулю.</p>
+     *
+     * <p>Человек целясь всё равно попадает в пределы нескольких градусов, и
+     * распределение широкое. Требуется серия подряд И высокая доля точных
+     * ударов — двойное условие как раз для «обычные игроки не страдают».</p>
+     */
+    private void preciseAimCheck(Player attacker, PlayerData data, LivingEntity target) {
+        double error = eyeAngleError(attacker, target);
+        if (error < 0.0) {
+            return; // посчитать не смогли — не флагуем
+        }
+        data.aimAngleErrors.addLast(error);
+        while (data.aimAngleErrors.size() > 40) {
+            data.aimAngleErrors.removeFirst();
+        }
+
+        double tight = confDouble("combat.aim.precise-error-degrees", 1.2);
+        if (error <= tight) {
+            data.preciseAimStreak++;
+        } else {
+            data.preciseAimStreak = Math.max(0, data.preciseAimStreak - 1);
+        }
+
+        int sample = Math.min(data.aimAngleErrors.size(), confInt("combat.aim.precise-sample", 30));
+        int tightHits = 0;
+        int seen = 0;
+        java.util.Iterator<Double> it = data.aimAngleErrors.descendingIterator();
+        while (it.hasNext() && seen < sample) {
+            if (it.next() <= tight) {
+                tightHits++;
+            }
+            seen++;
+        }
+        double share = seen == 0 ? 0.0 : (double) tightHits / seen;
+
+        if (data.preciseAimStreak >= confInt("combat.aim.precise-streak", 10)
+                && seen >= 20
+                && share >= confDouble("combat.aim.precise-share", 0.85)) {
+            flag(attacker, data, CheckId.KILLAURA, 1.5,
+                    "прицел " + data.preciseAimStreak + " ударов подряд в пределах "
+                            + formatVl(tight) + "° (" + formatVl(share * 100.0) + "% из " + seen + ")");
+            data.preciseAimStreak = 0;
+            data.aimAngleErrors.clear();
+        }
+    }
+
+    /**
+     * Угол между взглядом и направлением на центр хитбокса, градусы.
+     * {@code -1}, если посчитать нельзя.
+     */
+    private double eyeAngleError(Player attacker, LivingEntity target) {
+        try {
+            org.bukkit.util.Vector look = attacker.getEyeLocation().getDirection();
+            // Центр считаем по min/max: BoundingBox.getCenter() есть не во
+            // всех версиях API, а min/max есть всегда.
+            org.bukkit.util.BoundingBox box = target.getBoundingBox();
+            org.bukkit.util.Vector center = new org.bukkit.util.Vector(
+                    (box.getMinX() + box.getMaxX()) / 2.0,
+                    (box.getMinY() + box.getMaxY()) / 2.0,
+                    (box.getMinZ() + box.getMaxZ()) / 2.0);
+            org.bukkit.util.Vector toTarget = center.subtract(attacker.getEyeLocation().toVector());
+            if (look.lengthSquared() < 1.0E-6 || toTarget.lengthSquared() < 1.0E-6) {
+                return -1.0;
+            }
+            double dot = look.normalize().dot(toTarget.normalize());
+            return Math.toDegrees(Math.acos(Math.max(-1.0, Math.min(1.0, dot))));
+        } catch (Throwable ignored) {
+            return -1.0;
+        }
     }
 
     /** Смотрит ли игрок в сторону цели в пределах угла {@code fovDegrees}. */

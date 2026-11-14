@@ -138,6 +138,17 @@ public final class PlayerData {
     public double aimMovedDegrees;
     public long aimWindowStartMillis;
     public int idleAimStreak;
+    /**
+     * Углы между взглядом и направлением на центр цели в момент удара.
+     *
+     * <p>HvH-логика: у читера настраивается поворот, радиус, задержка и CPS,
+     * но НЕ точность наводки — без неё удар по цели не проходит. Поэтому
+     * вместо «насколько сильно крутится камера» меряем «насколько точно она
+     * встала на цель». Живой игрок распределён широко, aimbot сжат к нулю.</p>
+     */
+    public final ArrayDeque<Double> aimAngleErrors = new ArrayDeque<>();
+    /** Сколько ударов подряд взгляд был почти идеально на цели. */
+    public int preciseAimStreak;
     public int edgeReachStreak;
     public long lastOffscreenHitMillis;
     /**

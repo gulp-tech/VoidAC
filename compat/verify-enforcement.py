@@ -368,6 +368,21 @@ def main() -> int:
     if "combat.aim.silent-streak" not in src_text:
         fail("проверка скрытого поворота не требует серии")
 
+    # Точность прицела: то, что нельзя отключить настройкой чита.
+    checks += 1
+    for marker in ("preciseAimCheck", "eyeAngleError", "aimAngleErrors", "preciseAimStreak"):
+        if marker not in src_text:
+            fail(f"{marker} отсутствует — точность прицела не проверяется")
+            break
+    checks += 1
+    for marker in ("combat.aim.precise-streak", "combat.aim.precise-share"):
+        if marker not in src_text:
+            fail(f"{marker} отсутствует — без серии и доли будут ложные")
+            break
+    checks += 1
+    if "precise-error-degrees" not in src_text:
+        fail("порог точности прицела не настраивается")
+
     # ChestAura (com.arlen.app): открытие контейнера без подхода и без
     # движения взгляда. Обязательно требует серию и исключает слепоту,
     # иначе обычные игроки начнут ловить алерты.
