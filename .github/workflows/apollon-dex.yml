@@ -107,11 +107,17 @@ jobs:
 
       - name: Закоммитить
         run: |
+          set +e
           git config user.name "vac-bot"; git config user.email "bot@voidpe.local"
           git add -A apk-analysis/release-parts
-          if git diff --cached --quiet; then echo "нечего коммитить"; else
-            git commit -m "CI: части релиза чаавцппк [skip ci]"; git push
-          fi
+          if git diff --cached --quiet; then echo "нечего коммитить"; exit 0; fi
+          git commit -m "CI: части релиза чаавцппк [skip ci]"
+          # Параллельные job'ы тоже коммитят — подтягиваем и пробуем ещё раз.
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash -q origin "$GITHUB_REF_NAME" && git push && break
+            echo "попытка $i не удалась, повтор"; sleep 5
+          done
+          exit 0
 
   extract:
     runs-on: ubuntu-latest
