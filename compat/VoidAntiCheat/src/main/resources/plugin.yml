@@ -28,6 +28,11 @@ permissions:
     default: op
     children:
       voidanticheat.alerts: true
+  voidanticheat.staff:
+    description: "Права модератора: алерты, /vac, /vac info, /vac history, /vac top. Не даёт reload/check/world/reset/setback"
+    default: false
+    children:
+      voidanticheat.alerts: true
   voidanticheat.alerts:
     description: Получать алерты VoidAntiCheat
     default: op

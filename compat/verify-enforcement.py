@@ -150,7 +150,9 @@ def main() -> int:
         if sb_start <= i <= sb_end and "private boolean setbackPlayer(" in lines[i]:
             continue
         checks += 1
-        cmd_ctx = "\n".join(lines[max(0, i - 12): i + 1])
+        # Окно увеличено с 12 до 40 строк: в обработчике setback появились
+        # проверки прав, и метка case "setback" уехала вверх.
+        cmd_ctx = "\n".join(lines[max(0, i - 40): i + 1])
         if 'case "setback"' not in cmd_ctx:
             fail(f"строка {i + 1}: setbackPlayer() вызывается не из команды /vac setback")
 
@@ -428,6 +430,21 @@ def main() -> int:
         fail("не найден обработчик onAttack")
     elif "EventPriority.MONITOR" in m.group(0):
         fail("onAttack на MONITOR: reach уже мог отменить удар, боевые проверки не работают")
+
+    # --- 4k. права модератора ----------------------------------------------
+    checks += 1
+    if "voidanticheat.staff" not in src_text:
+        fail("нет права voidanticheat.staff — модератор не получит алерты без admin")
+    # Модератор не должен управлять плагином: reload/check/world/reset/setback
+    # обязаны остаться за admin, иначе он отключит проверки или сменит мир.
+    checks += 1
+    for sub in ('reload', 'check', 'world', 'reset', 'setback'):
+        if not _re.search(r'case "' + sub + r'" -> \{\s*\n\s*if \(!admin\(sender\)\)', src_text):
+            fail(f"подкоманда {sub} не закрыта админом — модератор сможет её вызвать")
+            break
+    checks += 1
+    if _re.search(r'if \(!admin\(sender\)\) \{\s*\n\s*tell\(sender, "no-permission"\);\s*\n\s*return true;\s*\n\s*\}\s*\n\s*String sub', src_text):
+        fail("вход в /vac остался за admin — модератор не увидит справку и алерты")
 
     # --- 5. периодическая задача ничего не делает сама ----------------------
     sec_start, sec_end = body_of(lines, "private void secondTick(")

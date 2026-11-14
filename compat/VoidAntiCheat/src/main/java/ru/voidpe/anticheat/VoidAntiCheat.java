@@ -3195,6 +3195,19 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         return sender.hasPermission("voidanticheat.admin");
     }
 
+    /**
+     * Права модератора: алерты и разбор игрока, без управления плагином.
+     *
+     * <p>Модератору нужны {@code /vac}, {@code /vac alerts}, {@code /vac info},
+     * {@code /vac history}, {@code /vac top} и подсказки к ним. Не нужно:
+     * reload, check, world, reset — это меняет поведение античита и остаётся
+     * за {@code voidanticheat.admin}.</p>
+     */
+    private boolean staff(CommandSender sender) {
+        return sender.hasPermission("voidanticheat.admin")
+                || sender.hasPermission("voidanticheat.staff");
+    }
+
     /** /vac check &lt;id&gt; [on|off|status] — переключение проверки без пересборки jar. */
     private boolean commandCheck(CommandSender sender, String[] args) {
         if (args.length < 2) {
@@ -3351,13 +3364,17 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!admin(sender)) {
+        if (!staff(sender)) {
             tell(sender, "no-permission");
             return true;
         }
         String sub = args.length == 0 ? "" : args[0].toLowerCase(Locale.ROOT);
         switch (sub) {
             case "reload" -> {
+                if (!admin(sender)) {
+                    tell(sender, "no-permission");
+                    return true;
+                }
                 reloadConfig();
                 // Кэши, вычисленные из конфига, обязательно сбрасываются:
                 // иначе settings.fast-attack-server менялся в файле, а плагин
@@ -3388,12 +3405,20 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 return true;
             }
             case "check" -> {
+                if (!admin(sender)) {
+                    tell(sender, "no-permission");
+                    return true;
+                }
                 // /vac check <id> [on|off|status] — включение проверки на лету,
                 // без правки jar и без рестарта. Значение живёт до перезапуска
                 // или /vac reload (тогда снова берётся из config.yml).
                 return commandCheck(sender, args);
             }
             case "world" -> {
+                if (!admin(sender)) {
+                    tell(sender, "no-permission");
+                    return true;
+                }
                 // /vac world list | add <маска> | remove <маска> | only <маска...> | clear-only
                 return commandWorld(sender, args);
             }
@@ -3558,6 +3583,10 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 return true;
             }
             case "reset" -> {
+                if (!admin(sender)) {
+                    tell(sender, "no-permission");
+                    return true;
+                }
                 if (args.length < 2) {
                     usage(sender, "reset");
                     return true;
@@ -3584,6 +3613,10 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
                 return true;
             }
             case "setback" -> {
+                if (!admin(sender)) {
+                    tell(sender, "no-permission");
+                    return true;
+                }
                 if (args.length < 2) {
                     usage(sender, "setback");
                     return true;
@@ -3677,7 +3710,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
         // Ничего не показываем тем, кто не может пользоваться командой, и
         // никогда не показываем аргументы сверх поддерживаемых: иначе клиент
         // рисует подсказки там, где команда их не примет.
-        if (!admin(sender) || args.length == 0) {
+        if (!staff(sender) || args.length == 0) {
             return List.of();
         }
         String sub = args[0].toLowerCase(Locale.ROOT);
