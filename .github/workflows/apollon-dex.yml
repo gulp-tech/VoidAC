@@ -53,6 +53,76 @@ jobs:
             git push
           fi
 
+  apk-latest:
+    # Любой .apk из последних релизов: находим ассет по имени сами,
+    # поэтому при заливке нового APK не нужно править ID.
+    # Из песочницы release-assets недоступен, в Actions — доступен.
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Найти последний .apk в релизах
+        id: find
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          # Перебираем релизы от новых к старым, берём ассеты .apk.
+          gh api "repos/${{ github.repository }}/releases?per_page=20" \
+            --jq '.[] | .created_at as $c | .assets[] | select(.name|test("\\.apk$")) | "\($c)\t\(.id)\t\(.name)\t\(.size)"' \
+            > /tmp/apks.txt
+          cat /tmp/apks.txt || true
+          LINE=$(sort -r /tmp/apks.txt | head -1)
+          if [ -z "$LINE" ]; then echo "нет .apk в релизах"; exit 0; fi
+          ID=$(echo "$LINE" | cut -f2); NAME=$(echo "$LINE" | cut -f3)
+          echo "id=$ID" >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "выбран: $NAME (id $ID)"
+
+      - name: Скачать APK
+        if: steps.find.outputs.id != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            -o /tmp/client.apk \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ steps.find.outputs.id }}"
+          ls -l /tmp/client.apk
+          sha256sum /tmp/client.apk
+          head -c 4 /tmp/client.apk | od -An -c
+
+      - name: Извлечь DEX, .so и манифест
+        if: steps.find.outputs.id != ''
+        run: |
+          OUT="$GITHUB_WORKSPACE/apk-analysis/apk-latest"
+          mkdir -p "$OUT"
+          unzip -l /tmp/client.apk > "$OUT/listing.txt" 2>&1 || true
+          unzip -o -q /tmp/client.apk '*.dex' 'AndroidManifest.xml' -d "$OUT" 2>/dev/null || true
+          unzip -o -q /tmp/client.apk 'lib/arm64-v8a/libReverseSigma.so' -d "$OUT" 2>/dev/null || true
+          echo "=== извлечено ==="
+          find "$OUT" -type f -printf '%s\t%p\n' | sort -rn | head -20
+          ( cd "$OUT" && sha256sum *.dex *.so 2>/dev/null ) > "$OUT/SHA256.txt" || true
+          cat "$OUT/SHA256.txt" || true
+
+      - name: Закоммитить
+        if: steps.find.outputs.id != ''
+        run: |
+          set +e
+          git config user.name "vac-bot"; git config user.email "bot@voidpe.local"
+          git add -A apk-analysis/apk-latest
+          if git diff --cached --quiet; then echo "нечего коммитить"; exit 0; fi
+          git commit -m "apk: разобран ${{ steps.find.outputs.name }} [skip ci]"
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash -q origin "$GITHUB_REF_NAME" && git push && break
+            echo "пуш $i не прошёл, повтор"; sleep 5
+          done
+          exit 0
+
   release-parts:
     # Части APK из релиза `чаавцппк`. Из песочницы release-assets
     # недоступен (302 + 0 байт), поэтому качаем в Actions и коммитим
