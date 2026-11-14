@@ -85,7 +85,9 @@ jobs:
           for f in /tmp/parts/*.bin; do
             echo "########## $f ##########" >> "$OUT/listing.txt"
             head -c 16 "$f" | od -An -tx1 >> "$OUT/listing.txt"
-            if unzip -l "$f" > /tmp/z.txt 2>/dev/null; then
+            if 7z l "$f" > /tmp/s7.txt 2>/dev/null; then
+              echo "--- 7Z ok ---" >> "$OUT/listing.txt"; cat /tmp/s7.txt >> "$OUT/listing.txt"
+            elif unzip -l "$f" > /tmp/z.txt 2>/dev/null; then
               echo "--- ZIP ok ---" >> "$OUT/listing.txt"; cat /tmp/z.txt >> "$OUT/listing.txt"
             else
               echo "--- НЕ zip ---" >> "$OUT/listing.txt"
@@ -100,7 +102,13 @@ jobs:
           i=0
           for f in /tmp/parts/*.bin; do
             i=$((i+1))
-            unzip -o -q "$f" 'lib/*arm64-v8a*' '*.dex' -d "$OUT/p$i" 2>/dev/null || true
+            7z x -y -o"$OUT/p$i" "$f" '*.apk' '*.dex' '*.so' 'lib/*' > /dev/null 2>&1 \
+              || unzip -o -q "$f" 'lib/*' '*.dex' -d "$OUT/p$i" 2>/dev/null || true
+            # Внутри 7z может быть APK — распаковываем и его.
+            for apk in "$OUT"/p$i/*.apk; do
+              [ -f "$apk" ] || continue
+              unzip -o -q "$apk" 'lib/arm64-v8a/libReverseSigma.so' '*.dex' -d "$OUT/p$i/apk" 2>/dev/null || true
+            done
           done
           find "$OUT" -type f -printf '%s\t%p\n' 2>/dev/null | head -30 || true
           du -sh "$OUT" || true
