@@ -1402,10 +1402,7 @@ public class VoidAntiCheat extends JavaPlugin implements Listener, CommandExecut
             data.chestAimDegrees = 0.0;
             data.chestWindowStartMillis = nowMillis;
         }
-        if (yawDelta > 125f || pitchDelta > 70f) {
-            data.lastBigRotationMillis = nowMillis;
-            data.rotationBeforeAttack = yawDelta;
-        }
+
 
         double teleportDelta = confDouble("movement.teleport-delta-blocks", 24.0);
         if ((horizontal > teleportDelta || Math.abs(dy) > teleportDelta) && !inGrace(data)) {

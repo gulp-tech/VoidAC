@@ -130,8 +130,6 @@ public final class PlayerData {
     public int placesThisTick;
     public int scaffoldPlaces;
     public long scaffoldWindowStartMillis;
-    public long lastBigRotationMillis;
-    public float rotationBeforeAttack;
     public float lastYawValue;
     public float lastPitchValue;
     /** Накопленное движение взгляда за окно 500 мс (градусы). */
