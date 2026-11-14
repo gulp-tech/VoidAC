@@ -53,6 +53,66 @@ jobs:
             git push
           fi
 
+  release-parts:
+    # Части APK из релиза `чаавцппк`. Из песочницы release-assets
+    # недоступен (302 + 0 байт), поэтому качаем в Actions и коммитим
+    # листинг — сам архив для git слишком велик.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Скачать части из релиза
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/parts
+          for id in 748040301 748040667; do
+            curl -sSL -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              -o "/tmp/parts/$id.bin" \
+              "https://api.github.com/repos/gulp-tech/VoidAC/releases/assets/$id"
+            ls -l "/tmp/parts/$id.bin"; sha256sum "/tmp/parts/$id.bin" || true
+          done
+
+      - name: Формат и содержимое
+        run: |
+          OUT="$GITHUB_WORKSPACE/apk-analysis/release-parts"
+          mkdir -p "$OUT"
+          : > "$OUT/listing.txt"
+          for f in /tmp/parts/*.bin; do
+            echo "########## $f ##########" >> "$OUT/listing.txt"
+            head -c 16 "$f" | od -An -tx1 >> "$OUT/listing.txt"
+            if unzip -l "$f" > /tmp/z.txt 2>/dev/null; then
+              echo "--- ZIP ok ---" >> "$OUT/listing.txt"; cat /tmp/z.txt >> "$OUT/listing.txt"
+            else
+              echo "--- НЕ zip ---" >> "$OUT/listing.txt"
+              head -c 64 "$f" | od -c >> "$OUT/listing.txt"
+            fi
+          done
+          wc -l "$OUT/listing.txt"; cat "$OUT/listing.txt" | head -60 || true
+
+      - name: Достать .so и dex
+        run: |
+          OUT="$GITHUB_WORKSPACE/apk-analysis/release-parts"
+          i=0
+          for f in /tmp/parts/*.bin; do
+            i=$((i+1))
+            unzip -o -q "$f" 'lib/*arm64-v8a*' '*.dex' -d "$OUT/p$i" 2>/dev/null || true
+          done
+          find "$OUT" -type f -printf '%s\t%p\n' 2>/dev/null | head -30 || true
+          du -sh "$OUT" || true
+
+      - name: Закоммитить
+        run: |
+          git config user.name "vac-bot"; git config user.email "bot@voidpe.local"
+          git add -A apk-analysis/release-parts
+          if git diff --cached --quiet; then echo "нечего коммитить"; else
+            git commit -m "CI: части релиза чаавцппк [skip ci]"; git push
+          fi
+
   extract:
     runs-on: ubuntu-latest
     timeout-minutes: 30
