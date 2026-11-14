@@ -8,9 +8,27 @@
 0000100
 ########## /tmp/parts/748040667.bin ##########
  37 7a bc af 27 1c 00 03 0e 69 92 b5 69 18 92 05
---- НЕ zip ---
-0000000   7   z 274 257   ' 034  \0 003 016   i 222 265   i 030 222 005
-0000020  \0  \0  \0  \0 274  \0  \0  \0  \0  \0  \0  \0   $ 215   [   G
-0000040  \0  \0   8   I 362 006   Q 231   7   # 237 025   |   > 315   j
-0000060 214   7 343 206   p   g 301   l   G 213   { 333  \0 355 346 315
-0000100
+--- 7Z ok ---
+
+7-Zip 23.01 (x64) : Copyright (c) 1999-2023 Igor Pavlov : 2023-06-20
+ 64-bit locale=C.UTF-8 Threads:4 OPEN_MAX:65536
+
+Scanning the drive for archives:
+1 file, 93460805 bytes (90 MiB)
+
+Listing archive: /tmp/parts/748040667.bin
+
+--
+Path = /tmp/parts/748040667.bin
+Type = 7z
+Physical Size = 93460805
+Headers Size = 220
+Method = LZMA:23
+Solid = -
+Blocks = 1
+
+   Date      Time    Attr         Size   Compressed  Name
+------------------- ----- ------------ ------------  ------------------------
+2026-11-14 16:13:33 ....A     92712584     93460585  MCPE_Apollon_Client_1.26.60_v6.71_64Bit.zip.004
+------------------- ----- ------------ ------------  ------------------------
+2026-11-14 16:13:33           92712584     93460585  1 files
