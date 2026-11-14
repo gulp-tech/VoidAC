@@ -96,6 +96,22 @@ jobs:
           done
           wc -l "$OUT/listing.txt"; cat "$OUT/listing.txt" | head -60 || true
 
+      - name: Проверить, что за файл внутри .7z
+        run: |
+          OUT="$GITHUB_WORKSPACE/apk-analysis/release-parts"
+          7z x -y -o/tmp/inner "/tmp/parts/748040667.bin" > /dev/null 2>&1 || true
+          f=$(find /tmp/inner -name '*.004' | head -1)
+          [ -n "$f" ] || exit 0
+          echo "=== .004 ===" >> "$OUT/listing.txt"
+          head -c 8 "$f" | od -An -tx1 >> "$OUT/listing.txt"
+          echo "sha256 = $(sha256sum "$f" | cut -d' ' -f1)" >> "$OUT/listing.txt"
+          if unzip -l "$f" > /tmp/z4.txt 2>/dev/null; then
+            echo "=== .004 это ZIP/APK ===" >> "$OUT/listing.txt"; cat /tmp/z4.txt >> "$OUT/listing.txt"
+            unzip -o -q "$f" 'lib/arm64-v8a/*' '*.dex' -d "$OUT/inner" 2>/dev/null || true
+          else
+            echo "=== .004 НЕ zip — часть разрезанного архива ===" >> "$OUT/listing.txt"
+          fi
+
       - name: Достать .so и dex
         run: |
           OUT="$GITHUB_WORKSPACE/apk-analysis/release-parts"
@@ -205,4 +221,9 @@ jobs:
           git status --short | head -20
           git diff --cached --quiet && { echo "изменений нет"; exit 0; }
           git commit -m "apk: извлечены DEX Apollon для статического анализа [skip ci]"
-          git push
+          set +e
+          for i in 1 2 3 4 5; do
+            git pull --rebase --autostash -q origin "$GITHUB_REF_NAME" && git push && break
+            echo "пуш $i не прошёл, повтор"; sleep 5
+          done
+          exit 0
